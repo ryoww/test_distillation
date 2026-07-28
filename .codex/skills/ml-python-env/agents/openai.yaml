@@ -1,0 +1,4 @@
+interface:
+  display_name: "ML Python 環境"
+  short_description: "PyTorch / Transformers / TensorFlow 環境を構築・診断する"
+  default_prompt: "$ml-python-env を使って、PyTorch・Transformers・TensorFlow の Python 機械学習環境を再現可能な形で構築または修復してください。"

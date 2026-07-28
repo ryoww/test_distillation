@@ -1,0 +1,19 @@
+[project]
+name = "test-distillation"
+version = "0.1.0"
+description = "Assistant-only LoRA distillation for a small local LLM."
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = []
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/train_distillation.py" = ["E402"]
+"scripts/validate_dataset.py" = ["E402"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
