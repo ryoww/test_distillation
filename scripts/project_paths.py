@@ -11,6 +11,13 @@ DATA_DIR = Path(os.getenv("DISTILL_DATA_DIR", REPO_ROOT / "data")).resolve()
 OUTPUT_DIR = Path(os.getenv("DISTILL_OUTPUT_DIR", REPO_ROOT / "outputs")).resolve()
 CACHE_DIR = Path(os.getenv("DISTILL_CACHE_DIR", REPO_ROOT / ".cache")).resolve()
 RUNTIME_DIR = Path(os.getenv("DISTILL_RUNTIME_DIR", REPO_ROOT / ".runtime")).resolve()
+CUDA_ENV_DIR = Path(os.getenv("DISTILL_CUDA_ENV_DIR", RUNTIME_DIR / "cuda-13.0")).resolve()
+MICROMAMBA_ROOT = Path(
+    os.getenv("DISTILL_MICROMAMBA_ROOT", CACHE_DIR / "micromamba" / "root")
+).resolve()
+MICROMAMBA_BIN = Path(
+    os.getenv("DISTILL_MICROMAMBA_BIN", RUNTIME_DIR / "micromamba" / "bin" / "micromamba")
+).resolve()
 
 HF_HOME = Path(os.getenv("HF_HOME", MODEL_DIR / "hf_home")).resolve()
 HF_HUB_CACHE = Path(os.getenv("HF_HUB_CACHE", HF_HOME / "hub")).resolve()

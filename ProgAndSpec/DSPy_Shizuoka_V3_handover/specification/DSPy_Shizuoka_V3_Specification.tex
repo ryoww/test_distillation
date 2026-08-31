@@ -1,0 +1,566 @@
+\documentclass[uplatex,dvipdfmx,a4paper,11pt]{jsarticle}
+
+\usepackage[margin=25mm]{geometry}
+\usepackage{amsmath,amssymb,amsthm,booktabs}
+\usepackage[dvipdfmx]{graphicx}
+\usepackage[dvipdfmx]{hyperref}
+\usepackage{url}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  frame=single,
+  breaklines=true,
+  columns=fullflexible,
+  showstringspaces=false,
+  keywordstyle=\color{blue!70!black},
+  commentstyle=\color{green!40!black},
+  stringstyle=\color{red!60!black},
+}
+
+\title{DSPy\_Shizuoka\_V3 仕様書（最終版・再現用）\\
+最適化アルゴリズム自動生成パイプライン}
+\author{DSPy\_Shizuoka\_V3 プロジェクト}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+本書は，DSPy + GEPA により最適化問題の要件テキストから
+実行可能な Python 関数 \texttt{solve(instance)} を
+自動生成・評価・改良するパイプライン
+「DSPy\_Shizuoka\_V3」の\textbf{最終版仕様}を，
+\emph{別部門が本ソースと同一データを用いて同じ実験を再現できること}を
+目的として記述したものである。
+アルゴリズムの詳細，評価メトリックの数式，Signature 指示文，
+Demonstrations，学習設定，再現手順，および
+参照値（OR-Tools 等による既知解）との精度比較を含む。
+コードは付属の \texttt{src/} 配下および \texttt{train\_gepa\_v3.py} を参照する。
+本書には開発途上の「フェーズ」履歴は含めず，現行の到達点のみを記す。
+\end{abstract}
+
+\tableofcontents
+
+% ==========================================================================
+\section{目的とスコープ}\label{sec:scope}
+% ==========================================================================
+
+\textbf{課題}：各最適化問題は自然言語の要件と
+JSON のインスタンスデータを持つ。目標は，LLM に
+\texttt{solve(instance)} という Python 関数を生成させ，
+その関数が出力する解の目的値が\textbf{参照値（既知の良解）以上}となる
+問題数を最大化することである。
+
+\textbf{手法}：DSPy の \texttt{ChainOfThought} で
+コードを生成し，安全なサンドボックスで実行して
+制約充足・目的値を採点する。GEPA
+(Genetic-Pareto Prompt Optimization) が採点フィードバックを
+用いて生成用の指示文（Instructions）を進化させる。
+
+\textbf{2 つの動作モード}：
+\begin{itemize}
+  \item \textbf{参照ありモード}（既定）：報酬に参照値を用い，
+    「参照一致 / 参照超え」を高く評価する。
+  \item \textbf{参照フリーモード}（\texttt{--no-reference}）：
+    参照値を報酬・フィードバックから完全に排除し，
+    強化学習的に「自ら得た解の改善」のみを報酬とする。
+    参照値の無い新規問題への適用を想定した動作。
+    参照値は\emph{最終結果の解析にのみ}使用する。
+\end{itemize}
+
+% ==========================================================================
+\section{実行環境と依存関係}\label{sec:env}
+% ==========================================================================
+
+\begin{center}
+\begin{tabular}{ll}
+  \toprule
+  項目 & 値 \\
+  \midrule
+  Python & \textbf{3.11}（3.9 は multiprocessing/GEPA で不具合） \\
+  DSPy & 3.3.0b1 \\
+  LLM & Qwen3.6-27B（OpenAI 互換エンドポイント） \\
+  エンドポイント & \texttt{http://10.81.105.102:11434/v1}（\texttt{src/lm\_config.py}） \\
+  temperature & 0.2 \\
+  max\_tokens & 8192 \\
+  timeout & 1800 秒 \\
+  環境変数 & \texttt{PYTHONIOENCODING=utf-8} \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{許可インポート}（生成コード内）：\texttt{math, random, heapq,
+itertools, collections, functools, typing, bisect, operator, json,
+copy, re, ortools, scipy, pulp, networkx, numpy}。
+\textbf{禁止}：\texttt{os, sys, subprocess, socket, pickle, requests,
+urllib, importlib, ctypes}。
+LLM エンドポイントは \texttt{src/lm\_config.py} の
+\texttt{configure\_qwen\_default()} で切替可能。
+別環境で再現する場合は \texttt{api\_base}/\texttt{model} を差し替える。
+
+% ==========================================================================
+\section{データ仕様}\label{sec:data}
+% ==========================================================================
+
+\subsection{入力ファイル形式}
+
+各問題は 1 つの JSON ファイル
+（\texttt{prob\_001.json} $\sim$ \texttt{prob\_100.json}，計 100 問）。
+トップレベルのキーは以下。
+
+\begin{center}
+\begin{tabular}{lll}
+  \toprule
+  キー & 型 & 内容 \\
+  \midrule
+  \texttt{id} & int & 問題 ID \\
+  \texttt{name} & str & 問題名 \\
+  \texttt{domain} & str & 分野（例：スケジューリング） \\
+  \texttt{math\_type} & str & 数理タイプ（例：動的計画法） \\
+  \texttt{difficulty} & str & 難易度 \\
+  \texttt{split} & str & 参考用の train/test ラベル \\
+  \texttt{description} & str & 自然言語の問題文 \\
+  \texttt{requirements} & dict & \texttt{objective}（目的文）と \texttt{constraints} \\
+  \texttt{instance} & dict & 実データ（solve に渡る dict そのもの） \\
+  \texttt{reference\_solution} & dict & 参照解（\texttt{objective\_value} と解構造） \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{参照値}は \texttt{reference\_solution.objective\_value}。
+\textbf{目的文}は \texttt{requirements.objective}
+（例：「総遅延時間の最小化」）で，最適化方向（最小化/最大化）と
+目的フィールド特定に用いる。
+\texttt{core\_type} はデータには無く，
+\texttt{domain} + \texttt{math\_type} から
+\texttt{data\_loader.core\_type\_from\_v3()} が生成する
+（例：\texttt{スケジューリング\_動的計画法}）。
+
+\subsection{訓練/テスト分割}
+
+\texttt{data\_loader.load\_and\_split\_stratified(data\_dir,
+n\_train=40, n\_test=20, seed=42)} により，
+100 問から \textbf{40 訓練 / 20 テスト}を層化抽出する。
+
+\begin{enumerate}
+  \item 全レコードを \texttt{core\_type} でグループ化。
+  \item 各グループ内を \texttt{seed=42} で決定的にシャッフル。
+  \item ラウンドロビンでテスト $\to$ 訓練の順に 1 問ずつ割当て，
+    両分割に \texttt{core\_type} 多様性を確保。
+\end{enumerate}
+
+\textbf{seed 固定により分割は完全再現可能}であり，
+参照あり/参照フリーの比較は同一のテスト集合上で行われる。
+
+\subsection{要件テキストの構築}
+
+\texttt{data\_loader} は各問題を \texttt{dspy.Example} 化する際，
+\texttt{requirement\_builder} で LLM 入力用の要件テキストを組み立てる。
+これには
+(a)~カテゴリ（core\_type），
+(b)~問題文，
+(c)~入出力フォーマット，
+(d)~インスタンスの生 JSON，
+(e)~\textbf{参照解の構造}（トップレベルのフィールド名・形状）
+が含まれる。
+\emph{参照解の「数値」は参照フリーモードでは隠蔽されるが，
+「構造（キー名）」は問題仕様として常に提示する}
+（\S\ref{sec:noref}）。
+推論時と学習時で同一 builder を使い，整合性を保つ。
+
+% ==========================================================================
+\section{パイプライン構成}\label{sec:pipeline}
+% ==========================================================================
+
+\begin{center}
+\begin{tabular}{ll}
+  \toprule
+  ファイル & 役割 \\
+  \midrule
+  \texttt{src/data\_loader.py} & データ読込・層化分割・Example 化・要件構築 \\
+  \texttt{src/requirement\_builder.py} & LLM 入力要件テキスト生成 \\
+  \texttt{src/signatures.py} & 3 つの Signature（指示文）定義 \\
+  \texttt{src/modules.py} & \texttt{AlgorithmGenerator} パイプライン \\
+  \texttt{src/metrics\_v3.py} & 評価メトリック本体 \\
+  \texttt{src/gepa\_feedback\_v3.py} & GEPA 用フィードバック生成 \\
+  \texttt{src/best\_known.py} & 既知最良/セルフベースライン管理 \\
+  \texttt{src/utils/safe\_exec.py} & サンドボックス実行 \\
+  \texttt{src/utils/feasibility.py} & 制約充足検査 \\
+  \texttt{src/utils/scorer.py} & 目的値計算補助 \\
+  \texttt{src/lm\_config.py} & LLM エンドポイント設定 \\
+  \texttt{train\_gepa\_v3.py} & 学習・評価エントリポイント \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{アルゴリズム生成（\texttt{AlgorithmGenerator}）}
+
+\texttt{src/modules.py} の \texttt{AlgorithmGenerator} は
+\texttt{dspy.Module} で，3 つの \texttt{ChainOfThought} を持つ。
+
+\begin{itemize}
+  \item \texttt{parse\_instance}（\texttt{ParseInstance}）：
+    instance dict を型安全にパースする補助コードを生成。
+  \item \texttt{generate}（\texttt{GenerateOptimizationAlgorithm}）：
+    \texttt{solve(instance)} 本体を生成。\textbf{GEPA が進化させる中心}。
+  \item \texttt{improve}（\texttt{ImproveAlgorithm}）：
+    フィードバックを受けてコードを改良（反復救済用）。
+\end{itemize}
+
+\texttt{forward()} では，安定性のため
+\emph{汎用の安全アクセサ}（\texttt{get\_list/get\_dict/get\_scalar}）を
+固定 \texttt{parse\_code} として注入し，
+実際のキーは要件テキスト中の生 JSON から LLM が読み取る設計とした
+（\texttt{instance} を \texttt{with\_inputs} に含めないことで
+GEPA コンパイル時の入力を要件テキストに一本化）。
+LLM 出力からは \texttt{strip\_code\_fence()} で
+\texttt{```python ... ```} コードを抽出する。
+
+\subsection{安全実行（\texttt{safe\_exec}）}
+
+生成コードは \texttt{multiprocessing}（spawn）で親から隔離実行する。
+実行時間上限，禁止インポートの遮断，例外捕捉を行い，
+戻り値（解 dict）または例外情報を返す。
+\textbf{spawn を用いるため，全実行ハーネスは
+\texttt{if \_\_name\_\_ == '\_\_main\_\_':} 下に置く必要がある}。
+
+% ==========================================================================
+\section{Signature 指示文（初期）}\label{sec:sig}
+% ==========================================================================
+
+生成の中心 \texttt{GenerateOptimizationAlgorithm}
+（\texttt{src/signatures.py}）の初期指示文は，
+最小限の \textbf{HARD RULES} に絞る。
+これは GEPA が進化させる「土台」であり，薄いほど進化が起きやすい。
+
+\begin{enumerate}
+  \item トップレベル関数はちょうど 1 つ：\texttt{def solve(instance):}。
+  \item 解を \texttt{return} する（\texttt{print} 不可）。戻り値は
+    要件の「参照解構造」節と\textbf{同じトップレベルのフィールド名}で，
+    非空でなければならない。
+  \item 空スケジュール・空ルート・\texttt{cost=0} を返さない
+    （score=0.1 で棄却）。
+  \item 実行時間上限 30 秒（OR-Tools はソルバ時間制限を設定）。
+  \item アルゴリズム本体を try/except で包み，失敗時は
+    非空解を返す貪欲ヒューリスティックにフォールバック。
+  \item \textbf{SYNTAX SAFETY}：括弧の対応を徹底し，
+    \texttt{model.Add(expr) for x in items} のような末尾ジェネレータを
+    禁止（実ループを使用）。OR-Tools 構文起因の
+    \texttt{exec\_error} を抑制する。
+\end{enumerate}
+
+入力フィールドは \texttt{requirement}（生 JSON と参照解構造を含む），
+\texttt{core\_type}，\texttt{parse\_code}。
+出力フィールドは \texttt{algorithm\_code}。
+
+\textbf{進化後の指示文}は \texttt{src/signatures.py} には無く，
+学習成果物
+\texttt{compiled\_program\_v3\_gepa\_*.json} の
+\texttt{generate.predict.signature.instructions} に格納される
+（\S\ref{sec:demo}，\S\ref{sec:results}）。再現時はこの JSON を
+\texttt{--program-path} で読み込めば学習済み指示文で評価できる。
+
+% ==========================================================================
+\section{評価メトリック}\label{sec:metric}
+% ==========================================================================
+
+評価は \texttt{evaluate\_algorithm\_v3()}
+（\texttt{src/metrics\_v3.py}）が担う。処理順は
+\textbf{実行 $\to$ 構造検証 $\to$ 制約検証（feasibility）$\to$
+目的値算出 $\to$ 採点}。
+
+\subsection{目的フィールドの自動検出}\label{sec:objsel}
+
+参照解が問題ごとに全く異なる構造を持つため，
+解 dict の中の「どの数値フィールドが目的値か」を
+\texttt{\_select\_objective\_field()} が汎用スコアで推定する。
+
+\begin{center}
+\begin{tabular}{lr}
+  \toprule
+  条件 & スコア \\
+  \midrule
+  \texttt{min\_} / \texttt{max\_} 接頭辞 & $+5$ \\
+  目的文トークンとの一致（日英対応） & $+4$ \\
+  集約接頭辞 \texttt{total\_/peak\_/expected\_/best\_/optimal\_} & $+2$ \\
+  解にキーが存在 & $+1$ \\
+  値がコンテナ要素数と一致（構造的カウント） & $-4$ \\
+  カウント的な名前 & $-1$ \\
+  出現順タイブレーク & $-\text{idx}\times 0.01$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+最大スコアのフィールドを目的値とみなす。
+最適化方向は \texttt{min\_/max\_} 接頭辞 $\to$ 目的文の「最大/最小」
+$\to$ キーワードの優先順で決定する。
+複数目的候補を持つ問題群で 10/10 の正解を確認済み。
+参照解が全く無い問題向けに，解 dict から自己参照で
+目的フィールドを推定する \texttt{generic\_ref\_guided\_cost} の
+フォールバックも実装している。
+
+\subsection{スコア計算（\texttt{compute\_v3\_score}）}\label{sec:score}
+
+コストは「小さいほど良い」に正規化される（最大化問題は符号反転）。
+\texttt{best\_known} を過去最良コスト，
+\texttt{anchor} を参照アンカー（参照ありモードでは
+\texttt{reference\_cost}，参照フリーでは初回実行可能コスト＝
+\emph{セルフベースライン}）とする。
+
+\paragraph{(1) 退化解の検出}
+\texttt{anchor}$>0$ かつ
+\texttt{cost} $<$ \texttt{anchor}$\times 0.05$ の場合，
+空/無効解の疑いとして status \texttt{suspicious\_zero}，score $=0.3$。
+
+\paragraph{(2) ベーススコア}（\texttt{best\_known} との比）
+\begin{itemize}
+  \item \texttt{best\_known} が未設定：base $=1.0$（\texttt{first\_valid}）。
+  \item 通常：$\text{ratio}=\texttt{best\_known}/\texttt{cost}$，
+    $\text{base}=\mathrm{clip}(2.0(\text{ratio}-0.5),\,0,\,2)$。
+    ratio$>1.01$ で \texttt{improved}，$<0.99$ で \texttt{worse}，
+    その間は \texttt{similar}。
+\end{itemize}
+
+\paragraph{(3) 参照ボーナス（参照ありモードのみ）}
+\texttt{reference\_cost}$>0$ のとき，
+\begin{itemize}
+  \item $|\texttt{cost}-\texttt{reference\_cost}|<10^{-6}$：
+    \texttt{exact\_match}，$\text{base}=\max(\text{base}+0.2,\,1.5)$。
+  \item $0<\texttt{cost}<\texttt{reference\_cost}$：
+    改善率 $r=(\texttt{ref}-\texttt{cost})/|\texttt{ref}|$ に対し
+    ボーナス $\min(0.5,\,0.2+0.3r)$，
+    $\text{base}=\max(\text{base}+\text{bonus},\,1.5)$，
+    status \texttt{beat\_reference}。
+\end{itemize}
+\textbf{参照フリーモードではこのブロックを完全にスキップ}する。
+
+\paragraph{(4) best\_known 改善ボーナス}
+$0<\texttt{cost}<\texttt{best\_known}$ で $+0.15$，
+1--10\% の微小改善に比例ボーナス。
+最終 score $=\min(\text{base},\,2.5)$。
+
+\subsection{status 一覧}
+
+\begin{center}
+\begin{tabular}{lll}
+  \toprule
+  status & 意味 & 概略スコア \\
+  \midrule
+  \texttt{exact\_match} & 参照値と一致（参照ありのみ） & $\geq 1.5$ \\
+  \texttt{beat\_reference} & 参照値を厳密改善（参照ありのみ） & $\geq 1.5$ \\
+  \texttt{improved}/\texttt{new\_best} & 既知最良を更新 & $>1.0$ \\
+  \texttt{first\_valid} & 初の実行可能解 & $1.0$ \\
+  \texttt{similar} & 最良とほぼ同等 & $\sim 1.0$ \\
+  \texttt{worse} & 最良より悪い有効解 & $0<s<1$ \\
+  \texttt{suspicious\_zero} & 退化解の疑い & $0.3$ \\
+  \texttt{infeasible} & 制約違反 & $0.0$ \\
+  \texttt{exec\_error} & 実行時例外 & $0.0$ \\
+  \texttt{parse\_error} & 出力構造不正 & $0.0$ \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{フィードバック生成}
+
+\texttt{gepa\_feedback\_v3}（\texttt{src/gepa\_feedback\_v3.py}）は
+評価結果を自然言語フィードバックに変換して GEPA に渡す。
+\texttt{classify\_exec\_error()} が例外を種別
+（import/syntax/timeout/type 等）に分類し，
+\texttt{summarize\_ref\_solution()} が参照解の
+トップレベルフィールド構造を要約する。
+これによりキー名不一致や構文エラーが
+指示文へ学習可能となる。
+\texttt{gap\_to\_reference}（参照とのギャップ）は
+\emph{常に}計算されるが，参照フリーモードでは
+\textbf{解析専用}であり報酬・フィードバックには使われない。
+
+% ==========================================================================
+\section{参照フリーモードの厳密化}\label{sec:noref}
+% ==========================================================================
+
+参照値を学習から完全排除するには，値が混入し得る
+\textbf{3 経路すべて}を断つ必要がある
+（\texttt{train\_gepa\_v3.py --no-reference}）。
+
+\begin{enumerate}
+  \item \textbf{報酬}：\texttt{compute\_v3\_score(use\_reference=False)}。
+    \texttt{exact\_match}/\texttt{beat\_reference} ボーナスと
+    参照ベースの退化検出を無効化し，
+    セルフベースライン（初回実行可能コスト，
+    \texttt{best\_known.set\_baseline\_if\_absent()}）を
+    正規化アンカーに用いる。
+  \item \textbf{best\_known 初期化}：参照値からの seeding を停止し，
+    参照シード済み \texttt{best\_known.jsonl} を\emph{読み込まず}，
+    空の \texttt{best\_known\_noref.jsonl} から開始。
+  \item \textbf{フィードバック文}：\texttt{set\_use\_reference(False)} と
+    \texttt{summarize\_ref\_solution(hide\_values=True)} により，
+    「この値以上を狙え」という数値目標行を削除。
+    出力スキーマ（フィールド名・形状）のみ残す。
+\end{enumerate}
+
+\textbf{コスト測定}は両モードで同一に保つため，
+目的フィールドの特定には参照解の\emph{構造}を引き続き用いる
+（値は使わない）。これにより比較は
+「参照値を報酬に使うか否か」だけを操作した対照実験となる。
+出力スキーマの提示は「解答」ではなく「問題仕様」であり，
+参照解答のリークには当たらない。
+
+% ==========================================================================
+\section{Demonstrations と学習設定}\label{sec:demo}
+% ==========================================================================
+
+\subsection{Demonstrations}
+
+\texttt{dspy.GEPA} は Instructions のみを進化させ few-shot 例は保持するため，
+既知の良コードを \texttt{program.generate.predict.demos} に手動付与する
+（\texttt{build\_demonstrations()}，\texttt{train\_gepa\_v3.py}）。
+\texttt{exact\_match} 型（\texttt{prob\_001}，DP，約 1.6\,KB）と
+\texttt{beat\_reference} 型（\texttt{prob\_021}，VRP，約 9\,KB）の
+2 実例を常在させ，「完全一致を狙う」ケースと
+「参照を上回る」ケースの双方を例示する。
+\texttt{--no-demos} で無効化可能。
+
+\subsection{GEPA 学習設定}
+
+\begin{center}
+\begin{tabular}{ll}
+  \toprule
+  項目 & 値 \\
+  \midrule
+  訓練/テスト & 40 / 20（\texttt{--n-train}/\texttt{--n-test}） \\
+  breadth & 6（\texttt{--breadth}） \\
+  depth & 8（\texttt{--depth}） \\
+  valset & 訓練の 1/3（40 なら 13，残り 27 が train\_only） \\
+  demos & 2 \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+GEPA が指示文を進化させるには，経験上
+「(a) ベース Signature を薄く」「(b) 予算を数十評価以上」
+「(c) valset を訓練の 1/3 以上」の 3 条件が必要である。
+
+% ==========================================================================
+\section{評価結果と参照値との比較}\label{sec:results}
+% ==========================================================================
+
+100 問・40 訓練 / 20 テスト（seed=42），breadth 6・depth 8，demos 2 の
+結果を示す。比較にはスコア式に依存しない\textbf{事後指標}を用いる：
+実行可能かつ実コストを持つ結果について
+\texttt{cost}$\le$\texttt{ref} を「参照以上」，
+\texttt{cost}$<$\texttt{ref} を「厳密超え」と数える
+（\texttt{exec\_error}/\texttt{infeasible} 等は除外）。
+この指標はモード非依存で per-problem に一致する。
+
+\begin{table}[htbp]
+  \centering
+  \caption{参照あり vs 参照フリー（同一テスト分割・事後指標）}
+  \label{tab:results}
+  \begin{tabular}{lcccc}
+    \toprule
+    & \multicolumn{2}{c}{参照あり} & \multicolumn{2}{c}{参照フリー} \\
+    \cmidrule(lr){2-3}\cmidrule(lr){4-5}
+    指標 & 訓練 & テスト & 訓練 & テスト \\
+    \midrule
+    参照以上（\texttt{cost}$\le$\texttt{ref}） & 22/40 & \textbf{7/20} & 20/40 & \textbf{7/20} \\
+    厳密超え（\texttt{cost}$<$\texttt{ref}） & 9/40 & 1/20 & 8/40 & 1/20 \\
+    有効解 & 29/40 & 12/20 & 37/40 & \textbf{19/20} \\
+    \texttt{exec\_error}（テスト） & \multicolumn{2}{c}{1} & \multicolumn{2}{c}{1} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{到達点}
+
+\begin{itemize}
+  \item \textbf{テスト参照超えは両モードで完全一致}（7/20，厳密 1/20）。
+    参照値を報酬から取り除いても参照超え件数は 100\% 維持された。
+  \item \textbf{参照フリーの方が有効解率が高い}
+    （テスト 12/20 $\to$ 19/20）。制約充足＋自己改善の報酬が
+    「まず正しく動く解」を強く促した結果である。
+  \item \texttt{exec\_error} はテスト 1 件に抑制（HARD RULE \#6 の効果）。
+  \item 平均スコアはモード間で報酬スケールが異なるため直接比較しない。
+    公平な軸は上記の事後指標である。
+\end{itemize}
+
+\subsection{学習された知識（進化後指示文）}
+
+参照ありモードの進化後 \texttt{generate} 指示文は約 17\,KB に達し，
+末尾に「Critical Learning from Previous Failures」節を形成する。
+実失敗から学んだ参照解キー名の具体例（下表）を多数含み，
+V3 の「参照解構造が問題ごとに全く異なる」困難に直接効いた。
+
+\begin{center}
+\begin{tabular}{lll}
+  \toprule
+  問題タイプ & 正しい目的/出力キー & 誤りやすいキー \\
+  \midrule
+  Bottleneck Assignment & \texttt{min\_bottleneck} & \texttt{bottleneck\_time} \\
+  Parallel Machine Sched. & \texttt{machine\_assignment}（Job ID） & Machine ID キー \\
+  Staff Rostering & \texttt{roster}（Staff ID） & Time slot キー \\
+  Shortest Path (P2P) & \texttt{shortest\_distance} & \texttt{distance} \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+% ==========================================================================
+\section{再現手順}\label{sec:repro}
+% ==========================================================================
+
+\begin{enumerate}
+  \item Python 3.11 環境に DSPy 3.3.0b1 と許可ライブラリ
+    （\texttt{ortools, scipy, pulp, networkx, numpy}）を導入。
+  \item \texttt{src/lm\_config.py} の \texttt{api\_base}/\texttt{model} を
+    自環境の LLM エンドポイントに合わせる。
+  \item データ 100 問（\texttt{prob\_001.json}$\sim$\texttt{prob\_100.json}）を
+    配置し，\texttt{train\_gepa\_v3.py} の \texttt{--data-dir} で指す。
+  \item \texttt{PYTHONIOENCODING=utf-8} を設定。
+\end{enumerate}
+
+\paragraph{参照ありモードの学習＋評価}
+\begin{lstlisting}[language=bash]
+python311 train_gepa_v3.py --n-train 40 --n-test 20 \
+    --breadth 6 --depth 8 --data-dir <DATA_DIR>
+# 出力: compiled_program_v3_gepa_phaseE.json,
+#       evaluation_results_v3_gepa_phaseE.json
+\end{lstlisting}
+
+\paragraph{参照フリーモードの学習＋評価}
+\begin{lstlisting}[language=bash]
+python311 train_gepa_v3.py --no-reference --n-train 40 --n-test 20 \
+    --breadth 6 --depth 8 --data-dir <DATA_DIR>
+# 出力: compiled_program_v3_gepa_phaseF_noref.json,
+#       evaluation_results_v3_gepa_phaseF_noref.json,
+#       data/best_known_noref.jsonl
+\end{lstlisting}
+
+\paragraph{学習済みプログラムの再評価のみ}
+\begin{lstlisting}[language=bash]
+python311 train_gepa_v3.py --eval-only \
+    --program-path compiled_program_v3_gepa_phaseE.json --data-dir <DATA_DIR>
+\end{lstlisting}
+
+\textbf{注意}：長時間・detach プロセスの標準出力を
+\texttt{Select-Object -First N} 等の早期終了パイプに通さないこと
+（プロセスが停止する）。ログはファイルへリダイレクトして別途参照する。
+学習は本環境で約 3 時間強を要する。
+
+% ==========================================================================
+\section{既知の限界と改良余地}\label{sec:limits}
+% ==========================================================================
+
+\begin{itemize}
+  \item テスト 20 問には運要素が残る。複数 seed 分割での平均評価が望ましい。
+  \item 時系列・複合構造（\texttt{trains} 等）で目的フィールド検出が
+    誤ることがある。目的文の構文解析による補強が有効。
+  \item 参照フリーの \texttt{new\_best} は空レジストリ由来で膨らむため，
+    status 単独では意味を持たない。事後指標が真の信号である。
+  \item 進化後指示文が 17\,KB と肥大化。タイプ別の階層化・要約が課題。
+  \item 完全スキーマレス化（目的文のみから目的フィールドを自己識別）は
+    フォールバック実装済みで，次段階の検証対象である。
+\end{itemize}
+
+\end{document}

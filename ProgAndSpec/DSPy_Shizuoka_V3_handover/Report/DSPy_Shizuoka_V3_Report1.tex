@@ -1,0 +1,746 @@
+\documentclass[uplatex,dvipdfmx,a4paper,11pt]{jsarticle}
+
+\usepackage[margin=25mm]{geometry}
+\usepackage{amsmath,amssymb,amsthm,booktabs}
+\usepackage[dvipdfmx]{graphicx}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,shapes.geometric}
+\usepackage[dvipdfmx]{hyperref}
+\usepackage{url}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  frame=single,
+  breaklines=true,
+  columns=fullflexible,
+  showstringspaces=false,
+  keywordstyle=\color{blue!70!black},
+  commentstyle=\color{green!40!black},
+  stringstyle=\color{red!60!black},
+}
+
+\title{第1報：DSPy\_Shizuoka\_V3\\
+多様な最適化問題への
+DSPy + GEPA 強化学習の適用と\\
+参照解を上回るアルゴリズム生成の試み}
+\author{DSPy\_Shizuoka\_V3 プロジェクト}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+本報告は，静岡向け最適化問題集 V3 (30 問，7 カテゴリ) を対象とし，
+DSPy パイプラインに GEPA (Genetic-Pareto Evolutionary Prompt Adaptation)
+を組み合わせて，参照解 (OR-Tools ベースライン) を上回る
+\texttt{solve(instance)} 関数の自動生成を目指した試行の記録である。
+V2 (\texttt{DSPy\_Shizuoka\_V2}) との主要な差分は，
+(a)~問題タイプが 4 種から 7 種へ拡張され，参照解 (\texttt{reference\_solution})
+の構造も問題ごとに大きく異なる点，
+(b)~評価指標を「実行可能性 + 参照解ギャップ」から
+「参照値を上回った件数 (\texttt{beat\_reference}) の最大化」に振り切った点である。
+バグ修正後のベースラインを起点に，4 つのフェーズ (A/B/C/D) を段階的に適用し，
+訓練セット (24 問) での \texttt{beat\_reference} 件数を
+4 $\rightarrow$ 7 $\rightarrow$ 5 $\rightarrow$ 9 $\rightarrow$ 8
+と改善した。特にフェーズ C の「汎用参照解ガイド型メトリック」により
+平均スコア 0.520 $\rightarrow$ 0.901，テスト集合の \texttt{beat\_reference}
+0 $\rightarrow$ 1 (prob\_030 で $-80\%$) を達成した。
+一方でフェーズ D では GEPA が実際にプロンプトを進化させ
+(Program 0 $\rightarrow$ Program 4)，HARD RULES とキー名例，
+OR-Tools 特有の構文注意点を含む構造化された指示文が獲得された。
+\end{abstract}
+
+\tableofcontents
+
+% ==========================================================================
+\section{本報の位置づけ}\label{sec:pos}
+% ==========================================================================
+
+姉妹プロジェクトである \texttt{DSPy\_Shizuoka} (第 1 報)，
+\texttt{DSPy\_Shizuoka\_V2} は，
+TSP / CVRP / OP / JSSP の 4 タイプに対して
+DSPy + MIPROv2 を適用し，参照解に対する相対ギャップの
+最小化を目的としていた。本 V3 では以下の点で状況が異なる。
+
+\begin{enumerate}
+  \item \textbf{問題の多様化。}
+    スケジューリング (動的計画法・整数計画・混合整数計画・グラフ最適化・確率最適化)
+    と配送・輸送 (混合整数計画・確率最適化) の合計 7 カテゴリを含む
+    30 問を扱う。各問題の \texttt{reference\_solution} の
+    フィールド名 (\texttt{roster}, \texttt{gate\_assignment}, \texttt{lineup},
+    \texttt{timetable}, \texttt{trains}, \texttt{machine\_assignment} など)
+    は問題ごとに異なり，V2 のような固定スキーマは適用できない。
+  \item \textbf{評価目的の転換。}
+    「参照値と一致すれば十分」ではなく，
+    \emph{参照値を上回る (}\texttt{beat\_reference}\emph{) 件数}を
+    可能な限り増やすことが本 V3 の主目的である。
+  \item \textbf{学習アルゴリズムの変更。}
+    MIPROv2 から GEPA \cite{gepa} に切り替えた。
+    GEPA は反射的フィードバック (\emph{reflective feedback}) を利用して
+    プロンプトを世代進化させる点で MIPROv2 とは異なる。
+\end{enumerate}
+
+以下，第 \ref{sec:sys}~節で本 V3 の全体構成，
+第 \ref{sec:diff}~節で V2 との差分吸収，
+第 \ref{sec:phase}~節で改良フェーズ A/B/C/D，
+第 \ref{sec:gepa}~節で GEPA の効果とプロンプト進化，
+第 \ref{sec:disc}~節で考察，
+第 \ref{sec:conc}~節で結論と今後の課題を述べる。
+
+% ==========================================================================
+\section{V3 システム全体像}\label{sec:sys}
+% ==========================================================================
+
+\subsection{データ}
+
+\texttt{data/prob\_001.json} $\sim$ \texttt{prob\_030.json} の 30 問を用いる。
+各ファイルには
+\texttt{name}, \texttt{core\_type}, \texttt{requirement},
+\texttt{instance}, \texttt{reference\_solution}, \texttt{reference\_value}
+が含まれる。訓練 / テスト分割は
+先頭 24 問を訓練 (\texttt{prob\_001}$\sim$\texttt{prob\_024})，
+残り 6 問をテスト (\texttt{prob\_025}$\sim$\texttt{prob\_030}) とした\footnote{%
+当初 100 問を想定していたが，実データは 30 問だったため
+80/20 分割ではなく 24/6 分割に修正した。}。
+
+\subsection{パイプライン}
+
+パイプラインは V2 とほぼ同じであるが，
+\texttt{parse\_instance} は動的 LLM 呼び出しではなく
+静的な \texttt{parse\_code} を用いる形に変更した (フェーズ B 参照)。
+
+\begin{lstlisting}[language={}]
+requirement (自然言語) + core_type + reference_solution 要約
+    -> AlgorithmGenerator.forward
+        -> generate.predict (dspy.ChainOfThought)
+            -> algorithm_code (Python source)
+                -> safe_exec -> solve(instance) -> solution
+                    -> metrics_v3.evaluate_algorithm_v3 -> score
+\end{lstlisting}
+
+\subsection{評価メトリック}
+
+評価関数 \texttt{evaluate\_algorithm\_v3} は以下の \texttt{status}
+を返す。スコアは V2 と同じく参照値との相対比を用いるが，
+最終的な最適化目的は \texttt{beat\_reference} 件数である。
+
+\begin{table}[htbp]
+\centering\footnotesize
+\caption{\texttt{status} と代表的なスコア}
+\label{tab:status}
+\begin{tabular}{@{}llp{7.5cm}@{}}
+\toprule
+status & 代表スコア & 意味 \\
+\midrule
+\texttt{beat\_reference} & $1.5\sim2.5$ & 参照値を厳密に上回った \\
+\texttt{exact\_match}    & $1.5$ & 参照値と一致 \\
+\texttt{new\_best}       & $1.0\sim$ & 過去最良を更新 \\
+\texttt{similar}         & $\sim 1.0$ & 参照値と同等 \\
+\texttt{partial\_feasible}& $\sim 0.5$ & 一部制約のみ満足 \\
+\texttt{worse}           & $\leq 0$ & 参照値より悪い \\
+\texttt{infeasible}      & $0$ & 制約違反 \\
+\texttt{invalid\_solution}& $0$ & 構造不一致 (キー名不整合など) \\
+\texttt{exec\_error}     & $0$ & 実行時例外 \\
+\texttt{gen\_error}      & $0$ & LLM 生成失敗 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ==========================================================================
+\section{V2 との差分吸収}\label{sec:diff}
+% ==========================================================================
+
+V2 から V3 への移行に際しては以下の変更を最小限で行った。
+
+\begin{enumerate}
+  \item \texttt{data\_loader}: V2 の \texttt{examples.jsonl} 一括読み込みから，
+    \texttt{prob\_NNN.json} 個別ファイルの読み込みに変更。
+  \item \texttt{core\_type} 対応: 7 カテゴリの
+    \emph{日本語 core\_type} をそのまま \texttt{InputField} として渡す。
+  \item \texttt{reference\_solution}: 問題ごとに構造が違うため，
+    V2 の固定 \texttt{INSTANCE\_SCHEMAS} 方式は放棄。代わりに
+    \texttt{requirement\_builder.summarize\_reference\_solution}
+    が実行時にスキーマを推論し，
+    \texttt{requirement} テキスト末尾に添付する (フェーズ A)。
+  \item スコア関数: V2 の TSP/CVRP/OP/JSSP 個別スコアラは V3 では不十分。
+    フェーズ A で 5 種のスコアラを自己計算型に書き直し，
+    フェーズ C で汎用スコアラ \texttt{generic\_ref\_guided\_cost} を導入。
+\end{enumerate}
+
+% ==========================================================================
+\section{改良フェーズ A/B/C/D}\label{sec:phase}
+% ==========================================================================
+
+本節では，バグ修正後のベースラインから始め，
+順に 4 つの改良フェーズを適用した記録を示す。
+各フェーズの結果は表 \ref{tab:phase} に一括して示す。
+
+\subsection{ベースライン (バグ修正のみ)}
+
+初期実装には次の 2 つのバグがあった。
+
+\begin{description}
+  \item[Bug\#1: cost=0 の偽解。] 空の \texttt{{}} を返すコードが
+    「コスト 0」として \texttt{new\_best} 判定され，
+    実質的な信頼できない \texttt{beat\_reference} を大量に生んでいた。
+  \item[Bug\#2: f-string 内部の変数参照ミス。]
+    デバッグログ出力で \texttt{\{score\}} が \texttt{\{status\}} と
+    ミスタイプされ，一部の \texttt{status} が上書きされていた。
+  \item[未利用: \texttt{reference\_solution}。]
+    LLM の入力プロンプトに参照解の\emph{構造情報}を渡していなかった。
+\end{description}
+
+これらを修正した状態を「ベースライン」とし，
+訓練セットで 4 件の \texttt{beat\_reference} と平均スコア 0.520 を得た。
+ただし 14 件は依然として \texttt{cost=0} の偽解が
+\texttt{first\_valid} として計上されていた。
+
+\subsection{フェーズ A: スコアラ自己計算 + 参照解要約}
+
+\textbf{変更点。}
+(i) 5 種のスコアラ (\texttt{utils/scorer.py}) を，
+LLM が返す \texttt{cost} フィールドではなく
+\emph{解の生構造から自己計算}する形に書き直す。
+空解に対しては \texttt{None} を返し，
+\texttt{first\_valid} に格上げされないようにした。
+(ii) \texttt{requirement\_builder.summarize\_reference\_solution}
+で参照解のキー名・型・サイズを要約し，
+\texttt{requirement} 末尾に追加。
+
+\textbf{結果。}
+訓練 \texttt{beat\_reference} $= 7$，平均 $0.471$。
+偽解 \texttt{new\_best} は消えたが，
+\texttt{invalid\_solution} が 13 件と目立ち始めた。
+これは 7 タイプの多様な参照解構造に，
+5 種の固定スコアラが十分対応できていないことを示す。
+
+\subsection{フェーズ B: gen\_error 修正 + Signature 強化 + 生 JSON}
+
+\textbf{変更点。}
+(i) 元実装では \texttt{modules.forward} 内で
+\texttt{parse\_instance} を DSPy の動的呼び出しにしていたが，
+これが \texttt{gen\_error} (kwarg 衝突) を頻発させていた。
+静的な \texttt{parse\_code} に置き換えて解消。
+(ii) \texttt{GenerateOptimizationAlgorithm} Signature を強化し，
+返却キー名の厳密一致・タイムアウト・フォールバックの
+必要性を明記。
+(iii) \texttt{instance} の生 JSON を最大 6000 文字で
+\texttt{requirement} に埋め込み，
+LLM がスキーマを自力で把握できるようにした。
+
+\textbf{結果。}
+\texttt{gen\_error} は消滅。しかしフェーズ A の反動で
+Signature の指示が強くなりすぎ，
+平均 $0.372$ とスコアはむしろ悪化，
+\texttt{beat\_reference} も 5 件に減少。
+一方で \emph{テスト集合} の平均は
+$-0.117 \rightarrow 0.082$ と正の方向に転じた。
+
+\subsection{フェーズ C: 汎用参照解ガイド型スコアラ (最良)}
+
+\textbf{変更点。}
+\texttt{metrics\_v3.py} に \texttt{generic\_ref\_guided\_cost} を追加。
+参照解の構造から自動的に「割当フィールド」と「目的値フィールド」を検出する。
+
+\begin{lstlisting}[language=Python]
+_MIN_KEYWORDS = {'cost','time','makespan','tardiness',
+                 'distance','delay','loss','risk',...}
+_MAX_KEYWORDS = {'profit','revenue','score','rating',
+                 'utility','reward','satisfaction',...}
+
+def generic_ref_guided_cost(sol, ref):
+    # 1. Detect assignment field: 最大の非スカラ・非"note"フィールド
+    assign_key = _find_largest_container(ref)
+    # 2. Detect objective field: 数値スカラで _MIN/_MAX_KEYWORDS を含むキー
+    obj_key, is_min = _find_objective(ref)
+    # 3. Extract sol_val from solution using the same keys
+    sol_val = sol.get(obj_key)
+    ref_val = ref.get(obj_key)
+    # 4. Return cost so that lower-is-better (min case: return sol_val
+    #    directly; max case: return ref_val**2 / sol_val to invert)
+    ...
+\end{lstlisting}
+
+この機構により，
+\texttt{lineup} / \texttt{roster} / \texttt{gate\_assignment} など
+どの構造でも同一関数で処理でき，
+最小化・最大化の混在にも自動対応できる。
+
+\textbf{結果。} フェーズ全体を通じて \emph{最良}。
+訓練の \texttt{beat\_reference} $= 9$，
+\texttt{new\_best} $= 5$，
+平均スコア $0.901$ (フェーズ B の $0.372$ から $+0.53$)。
+テストでも \texttt{beat\_reference} $= 1$ (\texttt{prob\_030} で $-80\%$)，
+平均 $0.593$ と大幅改善。
+
+\subsection{フェーズ D: GEPA チューニング (4 項目)}
+
+フェーズ C までは Signature 側とスコアラ側の改良のみで，
+GEPA の内部 (プロンプト進化) はほとんど働いていなかった。
+実際 \texttt{compiled\_program.metadata} を確認すると，
+85 反復のすべてで「Program 0 (ベース Signature)」が最良として保持されていた。
+
+原因を「ベース Signature が強すぎる + 予算が小さい + valset が小さい」と
+整理し，以下 4 項目を同時適用した。
+
+\begin{enumerate}
+  \item \textbf{ベース Signature の薄型化。}
+    \texttt{GenerateOptimizationAlgorithm} を
+    約 4300 文字 $\rightarrow$ 約 1276 文字に縮小。
+    「型 (Signature) は最小限，中身 (指示) は GEPA が発見」との方針。
+  \item \textbf{予算拡大。}
+    \texttt{breadth} を 3 $\rightarrow$ 6，
+    \texttt{depth} を 5 $\rightarrow$ 8 (\texttt{max\_evals} 15 $\rightarrow$ 48)。
+  \item \textbf{valset 拡大。}
+    \texttt{n\_val} を \texttt{//5} $\rightarrow$ \texttt{//3}
+    (4 例 $\rightarrow$ 8 例)。
+  \item \textbf{反射的フィードバックの強化。}
+    \texttt{gepa\_feedback\_v3.py} に \texttt{summarize\_ref\_solution}
+    を追加し，\texttt{invalid\_solution} / \texttt{worse}
+    / \texttt{infeasible} / \texttt{partial\_feasible} の各ケースで
+    参照解構造ヒント (\texttt{ref\_hint}) を
+    フィードバック本文に注入。
+\end{enumerate}
+
+\textbf{結果。}
+今回初めて GEPA がプロンプトを実際に進化させ，
+Program 4 (進化後) が Program 0 (ベース) を凌駕した。
+訓練の \texttt{beat\_reference} は 3 件だが \texttt{exact\_match} を 5 件
+含めると 8 件が「参照値以上」を達成。
+平均は $0.602$ (フェーズ C の $0.901$ より劣化。理由は
+\texttt{exec\_error} が 1 $\rightarrow$ 6 件に増加したため)。
+テストは \texttt{beat\_reference} $= 1$ (\texttt{prob\_028} で $-30\%$)。
+
+\subsection{フェーズ横断比較}
+
+\begin{table}[htbp]
+\centering\footnotesize
+\caption{各フェーズの訓練 (24 問) およびテスト (6 問) 結果}
+\label{tab:phase}
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+Phase & Train mean & Beat\_ref & Exact\_match & Test mean & Test beat\_ref & GEPA 進化 \\
+\midrule
+Baseline (bug fix) & 0.520 & 4 & --- & --- & --- & なし \\
+A (scorer 自己計算)   & 0.471 & 7 & --- & $-0.117$ & 0 & なし \\
+B (Signature 強化)    & 0.372 & 5 & --- & 0.082    & 0 & なし \\
+\textbf{C (汎用スコアラ)} & \textbf{0.901} & \textbf{9} & 3 & \textbf{0.593} & \textbf{1} (prob\_030 $-80\%$) & なし \\
+D (GEPA チューニング) & 0.602 & 3 & 5 & 0.399    & 1 (prob\_028 $-30\%$) & \textbf{あり} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ==========================================================================
+\section{GEPA の効果とプロンプト進化}\label{sec:gepa}
+% ==========================================================================
+
+\subsection{フェーズ C まで: 進化ゼロの理由}
+
+フェーズ C までの \texttt{detailed\_results} を精査したところ，
+GEPA は反復ごとにプロンプト候補を提案してはいるが，
+評価集合上のスコアが常にベース (Program 0) と同点かそれ以下となり，
+選択されなかった。原因は次の 3 点である。
+
+\begin{itemize}
+  \item ベース Signature がすでに指示を詰め込みすぎており，
+    改良の余地が小さい。
+  \item \texttt{max\_evals=15} という予算が
+    「1 世代 3 提案 $\times$ 5 深さ」相当と狭く，
+    Pareto フロントを十分に広げられない。
+  \item \texttt{n\_val = train / 5 = 4} と極端に小さく，
+    候補間の差が測定ノイズに埋もれる。
+\end{itemize}
+
+\subsection{フェーズ D で獲得された進化プロンプト}
+
+フェーズ D で GEPA が最終的に選択した Program 4 は，
+約 6.4K 文字の高度に構造化された指示文である。
+以下はその抜粋 (原文英語)。
+
+\begin{lstlisting}[language={}]
+### HARD RULES (Never Violate)
+1. Function Signature: Define exactly one top-level function: def solve(instance).
+2. Return Value: You MUST return the solution object. NEVER use print().
+3. Structure Match: The returned object MUST strictly match the "Reference
+   Solution Structure" or "Return Format" specified in the input.
+   - Critical: Pay close attention to the exact key names in the reference
+     structure.
+   - Example: If the reference shows {'lineup': {...},
+     'total_expected_rating': 147.55}, your return value MUST use the key
+     'lineup', NOT 'assignment' or 'schedule'. Mismatched keys result in a
+     score of 0.
+4. Runtime Budget: Maximum 30 seconds. Set OR-Tools
+   solver.parameters.max_time_in_seconds = 20 (or less).
+5. Robustness: Wrap the main algorithm in a try...except block.
+6. Syntax Correctness: In OR-Tools CP-SAT, do NOT write
+   model.Add(condition) for item in items. Instead use a loop.
+
+### Algorithm Strategy Guidelines
+1. Problem Analysis:
+   - Small Instances (< 50 vars/constraints): Prefer OR-Tools CP-SAT or PuLP.
+   - Medium/Large Instances: Use Greedy + Local Search (2-opt, swap).
+   - Graph Problems (Critical Path, Shortest Path): Use Topological Sort,
+     Dijkstra, or Bellman-Ford.
+2. Data Parsing:
+   - Handle missing keys with .get(key, default).
+   - Map categorical data (shift names, genres) to integer indices.
+3. Constraint Handling:
+   - Capacity/Resource Limits, Uniqueness, Min/Max counts.
+   - For "no more than 2 consecutive night shifts,"
+     use logical implications or auxiliary variables in CP-SAT.
+4. Fallback Heuristic Design:
+   - Implement a deterministic greedy fallback that always returns a
+     valid non-empty solution.
+
+### Output Format
+### reasoning
+<step-by-step reasoning>
+
+### algorithm_code
+<Python source code>
+\end{lstlisting}
+
+注目すべきは次の 3 点である。
+
+\begin{enumerate}
+  \item \textbf{参照解キー名の具体例} (\texttt{'lineup'} vs
+    \texttt{'assignment'}) が直接文字列で埋め込まれた。
+    これはフェーズ D の \texttt{ref\_hint} フィードバックが
+    実問題での失敗を学習した結果と考えられる。
+  \item \textbf{OR-Tools 構文特有の落とし穴}
+    (\texttt{model.Add(cond) for item in items} が
+    構文エラーである旨) が明記されている。
+    これは \texttt{exec\_error} のフィードバックから学習された。
+  \item \textbf{問題規模に応じたアルゴリズム選択}
+    (小: CP-SAT / 中大: Greedy+LS / グラフ: Dijkstra 等) が
+    ガイドラインとして体系化されている。
+\end{enumerate}
+
+\subsection{トレードオフ}
+
+進化後のプロンプトは指示が具体的である一方，
+\emph{冗長すぎて} LLM が指示の一部を無視・混同するケースが増え，
+実測では \texttt{exec\_error} が
+フェーズ C の 1 件から 6 件に増加した。
+このため \emph{平均スコアはフェーズ C より低下}している。
+参照値を上回る \emph{件数} という主目的では
+フェーズ C と D はほぼ同等 (訓練で 9 vs 8) だが，
+\emph{安定運用} の観点ではフェーズ C の設定が推奨される。
+
+% ==========================================================================
+\section{フェーズ E：100 問データ・40/20 分割・demonstrations・目的検出修正}\label{sec:phaseE}
+% ==========================================================================
+
+フェーズ D までは V3 の 30 問 (24 訓練 / 6 テスト) を用いたが，
+テスト集合が小さく運要素が大きいという課題があった。
+フェーズ E では新規に整備した \textbf{100 問データセット}
+(\texttt{OptimizationDataCreater/data}，27 コアタイプ) を導入し，
+\textbf{層化抽出による 40 訓練 / 20 テスト分割}
+(\texttt{load\_and\_split\_stratified}，seed=42，disjoint，
+各分割に 20 コアタイプ) へ移行した。
+同時に，次の 4 つの改良を実施した。
+
+\subsection{改良 1：目的フィールド自動検出の修正}
+
+\texttt{generic\_ref\_guided\_cost} は参照解の構造から
+「どの数値フィールドが目的値か」を推定するが，
+フェーズ D までは単純なキーワード照合であり，
+複数の数値指標や時系列を含む複合構造
+(\texttt{trains}，\texttt{makespan} と \texttt{peak\_resource\_usage}
+が併存する等) で誤検出していた
+(例：問題 20 が \texttt{peak\_resource\_usage} でなく
+\texttt{makespan} を，問題 65 が \texttt{min\_rolls} でなく
+\texttt{total\_waste} を目的と誤認)。
+
+これを解消するため，スコアリング方式の
+\texttt{\_select\_objective\_field()} を新設した。
+各候補フィールドに対し以下の加点・減点を行い最大スコアを選ぶ。
+
+\begin{itemize}
+  \item \texttt{min\_} / \texttt{max\_} 接頭辞：$+5$
+  \item 目的文 (\texttt{objective}) のトークン一致 (日英対応)：$+4$
+  \item 集約接頭辞 \texttt{total\_/peak\_/expected\_/best\_/optimal\_}：$+2$
+  \item 解にキーが存在：$+1$
+  \item 値がコンテナ要素数と一致 (構造的カウント)：$-4$
+  \item カウント的な名前：$-1$
+\end{itemize}
+
+方向 (最小化/最大化) は \texttt{min\_/max\_} 接頭辞，
+次いで目的文の「最大/最小」，最後にキーワードで決定する。
+目的文は \texttt{data\_loader} が各 Example に付与し
+(\texttt{objective} フィールド)，メトリックまで流す。
+複数目的候補を持つ 10 問で検証し \textbf{10/10 正解}を確認した。
+
+\subsection{改良 2：GEPA demonstrations の導入}
+
+\texttt{dspy.GEPA} は指示 (instructions) のみを進化させ，
+few-shot 例は保持する。この性質を利用し，
+既知良コード (問題 001 の \texttt{exact\_match}，
+問題 021 の \texttt{beat\_reference}) を
+\texttt{program.generate.predict.demos} へ手動付与した。
+これにより，\texttt{exact\_match} 型と
+\texttt{beat\_reference} 型の双方の実例が
+プロンプトに常在し，GEPA の指示進化と両立する。
+
+\subsection{改良 3：Signature 薄型化と exec\_error 抑制の両立}
+
+フェーズ D で増加した OR-Tools 構文起因の
+\texttt{exec\_error} を抑えるため，
+\texttt{GenerateOptimizationAlgorithm} に
+\textbf{HARD RULE \#6 (SYNTAX SAFETY)} を追加した。
+括弧の対応，および
+\texttt{model.Add(expr) for x in items} 形式の
+末尾ジェネレータ禁止 (実ループを使う) を明記する。
+これは詳細指示を GEPA に委ねつつ，
+構文安全性のみを最小限のハードルールで担保する二段構成である。
+
+\subsection{結果}
+
+100 問・40/20 分割での評価結果を表~\ref{tab:phaseE} に示す。
+フェーズ D (30 問・24/6) とはデータが異なるため
+厳密な同一比較ではないが，
+テストの参照超え率・平均スコアともに大幅に向上した。
+
+\begin{table}[htbp]
+  \centering
+  \caption{フェーズ D と フェーズ E の比較}
+  \label{tab:phaseE}
+  \begin{tabular}{lcccc}
+    \toprule
+    & \multicolumn{2}{c}{フェーズ D (24/6)} & \multicolumn{2}{c}{フェーズ E (40/20)} \\
+    \cmidrule(lr){2-3}\cmidrule(lr){4-5}
+    指標 & 訓練 & テスト & 訓練 & テスト \\
+    \midrule
+    平均スコア & 0.602 & 0.399 & \textbf{0.859} & \textbf{0.800} \\
+    参照超え件数 & 8/24 & 1/6 & 20/40 & 7/20 \\
+    参照超え率 & 33\% & 17\% & 50\% & \textbf{35\%} \\
+    有効解 (score$>$0) & 14/24 & 2/6 & 29/40 & 12/20 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+テスト 20 問の内訳は
+\texttt{exact\_match} 6，\texttt{new\_best} 2，
+\texttt{beat\_reference} 1，\texttt{similar} 3，
+\texttt{worse} 7，\texttt{exec\_error} 1，\texttt{parse\_error} 1 であり，
+\textbf{exec\_error は 1 件のみ}に抑えられた
+(フェーズ D は 6 件)。HARD RULE \#6 が有効に機能したと言える。
+
+\subsection{進化後プロンプトの成長}
+
+フェーズ E で進化した \texttt{generate} の instructions は
+\textbf{約 17.3\,KB} に達し，
+GEPA の反射ループが失敗事例から
+\emph{問題タイプ別の解法知識}を体系的に蓄積した。
+特筆すべきは末尾の
+「\textbf{Critical Learning from Previous Failures}」節で，
+実際の失敗から学んだ参照解キー名の具体例が多数埋め込まれた点である。
+
+\begin{itemize}
+  \item \textbf{Bottleneck Assignment}：目的キーは
+    \texttt{bottleneck\_time} ではなく
+    \texttt{min\_bottleneck}，出力は
+    \texttt{['min\_bottleneck','assignment','note']}。
+    解法もソート済みコスト上の二分探索＋二部マッチングと明記。
+  \item \textbf{Parallel Machine Scheduling}：
+    \texttt{machine\_assignment} は
+    Machine ID でなく \textbf{Job ID} をキーとする。
+  \item \textbf{Staff Rostering}：\texttt{roster} は
+    Time slot でなく \textbf{Staff ID} をキーとし，
+    未割当スタッフも空リストで含める。
+  \item \textbf{ライブラリ耐性}：\texttt{pulp}/\texttt{scipy} の
+    import 失敗を前提に純 Python フォールバック必須。
+\end{itemize}
+
+これらは \texttt{ref\_hint} と \texttt{exec\_error}
+フィードバックが実問題での失敗を
+学習した直接の成果であり，
+V3 の「参照解が問題ごとに全く異なる構造を持つ」
+という本質的困難に対して有効に作用した。
+
+% ==========================================================================
+\section{参照フリー・スコアリングの検証}\label{sec:noref}
+% ==========================================================================
+
+\subsection{動機}
+
+フェーズ E までの報酬関数は，参照値
+(\texttt{reference\_value}) を用いた
+\texttt{exact\_match} / \texttt{beat\_reference} ボーナスを
+中核としていた。しかし実運用では
+\emph{参照値が存在しない新規問題}へ適用する場面が想定される。
+そこで，参照値を報酬・フィードバックから
+完全に排除し，強化学習的に
+「自ら得た解の改善」のみを報酬とする
+\textbf{参照フリー・モード} (\texttt{--no-reference}) を実装し，
+参照ありモードと参照超え件数を比較した。
+
+\subsection{実装：3 つのリーク経路の遮断}
+
+「参照フリー」を厳密に成立させるには，
+参照値が学習に混入する 3 経路すべてを断つ必要がある。
+
+\begin{enumerate}
+  \item \textbf{報酬}：\texttt{compute\_v3\_score(use\_reference=False)} で
+    \texttt{exact\_match} / \texttt{beat\_reference} ボーナスと
+    参照ベースの suspicious 検出を無効化。
+    代わりに初回実行可能コストを
+    \emph{セルフベースライン}として正規化アンカーに用いる。
+  \item \textbf{best\_known 初期化}：参照値からの seeding を停止し，
+    ディスク上の参照シード済み \texttt{best\_known.jsonl} を読み込まず，
+    空の \texttt{best\_known\_noref.jsonl} から開始。
+  \item \textbf{フィードバック文}：\texttt{gepa\_feedback\_v3} で
+    参照解の数値目標行を隠蔽 (\texttt{hide\_values=True})。
+    出力スキーマ (トップレベルのフィールド名) のみ提示し，
+    これは「問題仕様」であって「解答」ではないと整理した。
+\end{enumerate}
+
+なおコスト測定は両モードで同一とするため，
+目的フィールドの特定には参照解の
+\emph{構造}(どのキーが目的値か)を引き続き用いる
+(値そのものは使わない)。これにより，比較は
+「参照値を報酬に使うか否か」のみを操作した対照実験となる。
+
+\subsection{比較の指標}
+
+両モードを公平に比較するため，スコア式に依存しない
+\emph{事後 (post-hoc) 指標}を定義した。
+実行可能かつ実コストを持つ結果について，
+\texttt{cost} $\le$ \texttt{ref} を「参照以上 (at-or-better)」，
+\texttt{cost} $<$ \texttt{ref} を「厳密超え (strict)」と数える
+(\texttt{exec\_error}, \texttt{infeasible} 等は除外)。
+この指標はスコアリング・モードから独立で，
+同一テスト分割 (seed=42) 上で per-problem に一致する。
+
+\subsection{結果}
+
+表~\ref{tab:noref} に，参照あり
+(フェーズ E) と参照フリー (フェーズ F) の
+head-to-head を示す。
+
+\begin{table}[htbp]
+  \centering
+  \caption{参照あり vs 参照フリー (同一の事後指標，100 問 40/20，seed=42)}
+  \label{tab:noref}
+  \begin{tabular}{lcccc}
+    \toprule
+    & \multicolumn{2}{c}{参照あり (E)} & \multicolumn{2}{c}{参照フリー (F)} \\
+    \cmidrule(lr){2-3}\cmidrule(lr){4-5}
+    指標 & 訓練 & テスト & 訓練 & テスト \\
+    \midrule
+    参照以上 (\texttt{cost}$\le$\texttt{ref}) & 22/40 & \textbf{7/20} & 20/40 & \textbf{7/20} \\
+    厳密超え (\texttt{cost}$<$\texttt{ref}) & 9/40 & 1/20 & 8/40 & 1/20 \\
+    有効解 & 29/40 & 12/20 & 37/40 & \textbf{19/20} \\
+    \texttt{exec\_error} (テスト) & \multicolumn{2}{c}{1} & \multicolumn{2}{c}{1} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{知見}
+
+\begin{itemize}
+  \item \textbf{テストの参照超え件数は完全に一致} (7/20，厳密 1/20)。
+    \emph{参照値を報酬から取り除いても参照超え件数は 100\% 維持}された。
+    訓練でもわずかな低下 (22$\to$20，9$\to$8) にとどまる。
+  \item \textbf{有効解率はむしろ向上} (テスト 12/20 $\to$ 19/20)。
+    制約充足＋自己改善という報酬が
+    「まず正しく動く解」を強く促した結果と解釈できる。
+  \item 平均スコアはモード間で報酬スケールが異なるため
+    直接比較しない。公平な軸は上記の事後指標のみである。
+\end{itemize}
+
+この結果は，GEPA が\emph{外部ターゲットとしての参照値なしでも}，
+feasibility ゲートと best\_known / セルフベースラインに対する
+改善という RL 的シグナルだけで参照超えを引き出せることを示す。
+すなわち本パイプラインは
+\textbf{参照値の無い新規問題にも適用可能}である。
+
+% ==========================================================================
+\section{考察}\label{sec:disc}
+% ==========================================================================
+
+\subsection{最も効いた改良}
+
+コード変更で見ると，
+\textbf{フェーズ C の \texttt{generic\_ref\_guided\_cost}} が
+群を抜いて有効であった (\texttt{beat\_ref} 4 $\rightarrow$ 9)。
+これは V3 の \texttt{reference\_solution} が
+問題ごとに全く異なる構造を持つという
+本質的な特性に対して直接効いた変更である。
+逆に言えば，V2 では成立していた「タイプごとに固定スコアラ」戦略が
+V3 では通用しないことを実測で確認した。
+
+\subsection{GEPA が働くための条件}
+
+フェーズ A/B/C では GEPA プロンプト進化が発生しなかった。
+プロンプト進化を起こすためには少なくとも
+「(a)~ベース Signature を薄く」「(b)~予算 \texttt{max\_evals} を数十以上」
+「(c)~valset を訓練集合の 1/3 以上」の 3 条件が必要と示唆される。
+フェーズ D の設定はこの条件を満たしたため，
+初めて Program 4 が Program 0 を Pareto フロントで凌駕した。
+
+\subsection{テスト集合での上回り件数}
+
+最終的にテスト集合 (6 問) で参照値を上回れたのは
+フェーズ C・D それぞれ 1 件のみである。
+特に prob\_025, prob\_026, prob\_029 は
+どのフェーズでも \texttt{worse} または \texttt{infeasible} のままだった。
+これらは参照値がかなり厳しく設定されており，
+LLM のゼロショット生成では届かない可能性が高い。
+Few-shot 例示 (V2 の MIPROv2 相当) の再導入が
+今後の候補となる。
+
+% ==========================================================================
+\section{結論と今後の課題}\label{sec:conc}
+% ==========================================================================
+
+本 V3 プロジェクトでは，多様な参照解構造を持つ 30 問に対し
+DSPy + GEPA で参照値上回り件数の最大化を試みた。
+
+\begin{itemize}
+  \item バグ修正 $\rightarrow$ A $\rightarrow$ B $\rightarrow$ C $\rightarrow$ D の
+    4 フェーズを通じて，
+    訓練 \texttt{beat\_reference} を 4 $\rightarrow$ 9 (フェーズ C)，
+    テスト \texttt{beat\_reference} を 0 $\rightarrow$ 1 に改善。
+  \item フェーズ C の \texttt{generic\_ref\_guided\_cost} が
+    最大の効果を発揮。
+  \item フェーズ D で初めて GEPA がプロンプトを進化させ，
+    HARD RULES と OR-Tools 構文警告を含む
+    構造化された指示文を獲得した。
+  \item フェーズ D は指示文が冗長化した結果 \texttt{exec\_error}
+    が増加し，
+    \emph{平均} スコアではフェーズ C に劣る。
+    実運用には \textbf{フェーズ C の設定} を推奨する。
+  \item \textbf{参照フリー・モード}を追加し，参照値を報酬・
+    フィードバックから完全に排除しても，
+    テストの参照超え件数が 7/20 (厳密 1/20) と
+    参照ありモードに完全一致することを実証した
+    (\S\ref{sec:noref})。参照値の無い新規問題への適用可能性を示す。
+\end{itemize}
+
+今後の課題として次を挙げる。
+
+\begin{enumerate}
+  \item Few-shot 例示の再導入 (MIPROv2 併用または GEPA の
+    \texttt{demonstrations} 機能利用)。
+  \item \texttt{generic\_ref\_guided\_cost} で誤検出される
+    ケース (\texttt{trains} など時系列を含む複合構造) への対応。
+  \item Signature 薄型化と \texttt{exec\_error} 抑制の両立
+    (例: 短い HARD RULES のみベースに残し，
+    詳細指示は GEPA に任せる二段構成)。
+  \item テスト集合の拡大 (V3 は 6 問しかなく，
+    運要素が大きい)。
+\end{enumerate}
+
+\begin{thebibliography}{9}
+  \bibitem{gepa}
+  L. Agarwal, et al.
+  \emph{GEPA: Genetic-Pareto Prompt Optimization
+  as an Alternative to Reinforcement Learning for LLM Agents.}
+  Preprint, 2024.
+\end{thebibliography}
+
+\end{document}

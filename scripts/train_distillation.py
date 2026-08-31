@@ -65,11 +65,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-config", default="sft_final")
     parser.add_argument("--run-name")
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--resume-from-checkpoint", type=Path)
     parser.add_argument("--max-length", type=int, default=4096)
     parser.add_argument("--max-train-samples", type=int)
     parser.add_argument("--max-eval-samples", type=int, default=256)
     parser.add_argument("--include-tools", action="store_true")
     parser.add_argument("--load-in-4bit", action="store_true")
+    parser.add_argument(
+        "--full-finetune",
+        action="store_true",
+        help="Update all model parameters instead of adding LoRA adapters.",
+    )
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--lora-dropout", type=float, default=0.05)
@@ -166,6 +172,8 @@ def prepare_split(
 
 def main() -> None:
     args = parse_args()
+    if args.full_finetune and args.load_in_4bit:
+        raise ValueError("--full-finetune cannot be combined with --load-in-4bit")
     set_seed(args.seed)
     timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     run_name = args.run_name or f"agents-a1-4b-distill-{timestamp}"
@@ -224,19 +232,26 @@ def main() -> None:
     if args.load_in_4bit:
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
     model.config.use_cache = False
-    targets = select_text_lora_targets(model)
-    model = get_peft_model(
-        model,
-        LoraConfig(
-            r=args.lora_r,
-            lora_alpha=args.lora_alpha,
-            lora_dropout=args.lora_dropout,
-            target_modules=targets,
-            bias="none",
-            task_type="CAUSAL_LM",
-        ),
-    )
-    model.print_trainable_parameters()
+    targets = []
+    if args.full_finetune:
+        for parameter in model.parameters():
+            parameter.requires_grad = True
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"trainable params: {trainable:,} || all params: {trainable:,} || trainable%: 100.0")
+    else:
+        targets = select_text_lora_targets(model)
+        model = get_peft_model(
+            model,
+            LoraConfig(
+                r=args.lora_r,
+                lora_alpha=args.lora_alpha,
+                lora_dropout=args.lora_dropout,
+                target_modules=targets,
+                bias="none",
+                task_type="CAUSAL_LM",
+            ),
+        )
+        model.print_trainable_parameters()
 
     training_args = TrainingArguments(
         output_dir=str(run_dir / "checkpoints"),
@@ -260,6 +275,7 @@ def main() -> None:
         save_total_limit=2,
         eval_strategy="no",
         report_to=["tensorboard"],
+        disable_tqdm=False,
         remove_unused_columns=False,
         seed=args.seed,
         data_seed=args.seed,
@@ -283,7 +299,7 @@ def main() -> None:
         json.dumps(config, indent=2, default=str) + "\n",
         encoding="utf-8",
     )
-    trainer.train()
+    trainer.train(resume_from_checkpoint=str(args.resume_from_checkpoint) if args.resume_from_checkpoint else None)
     adapter_dir = run_dir / "adapter"
     trainer.model.save_pretrained(adapter_dir)
     tokenizer.save_pretrained(adapter_dir)
