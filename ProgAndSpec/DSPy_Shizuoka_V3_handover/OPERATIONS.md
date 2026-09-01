@@ -287,6 +287,28 @@ uv run python scripts/compare_prompt_models.py --dry-run
 
 dry-runはサーバーへ接続せず、選択したモデルの子コマンドだけを表示します。
 
+#### 保存済みコードの再採点
+
+feasibilityチェッカーを追加・変更するとスコアの意味が変わるため、過去の
+`factorial_comparison.json`と新しい結果は直接比較できません。評価結果JSONには
+各問題の生成コードが保存されているので、LLMもGPUも使わずに再採点できます。
+
+```bash
+cd /home/yy-lab/test_distillation/ProgAndSpec/DSPy_Shizuoka_V3_handover
+uv run python scripts/rescore_with_checkers.py \
+  outputs/prompt_model_comparisons/prompt-model-qwen36 \
+  outputs/prompt_model_comparisons/prompt-model-qwen38 \
+  --subsets-from outputs/prompt_model_comparisons/prompt-model-full100-merged/factorial_comparison.json \
+  --output outputs/prompt_model_comparisons/rescored.json
+```
+
+各shardディレクトリを1つの評価単位として扱い、元実行と同じ順序で
+`BestKnownRegistry`を参照値からseedし直します。再実行したコストが保存値と
+食い違う問題は`cost_mismatches`へ記録します。ソルバーの時間制限や乱数を含む
+解法が該当するので、件数が多い場合は結果の解釈に注意してください。
+
+生成段階で落ちた`gen_error`のレコードにはコードが無いため、そのまま引き継ぎます。
+
 ## 5. GEPA再学習
 
 参照あり:
