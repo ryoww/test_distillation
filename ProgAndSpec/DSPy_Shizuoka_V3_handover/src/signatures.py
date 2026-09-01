@@ -3,6 +3,7 @@
 V1をV2に移植。40+のcore_typeを動的に扱う。
 instance_schemaは不要（問題文に含まれる）。
 """
+
 from __future__ import annotations
 
 import dspy
@@ -50,9 +51,14 @@ class ParseInstance(dspy.Signature):
     depot = instance.get('depot', {})  # dict with keys [x, y]
     vehicles = instance.get('vehicles', [])  # list[4] of dicts with keys [id, capacity, fixed_cost, cost_per_km]
     """
+
     requirement: str = dspy.InputField(desc="Problem description mentioning variable names")
-    instance: str = dspy.InputField(desc="Instance dict with STRUCTURE ANALYSIS showing exact types and nested keys for each field")
-    parse_code: str = dspy.OutputField(desc="Python variable assignment statements using .get() with type-safe defaults for EVERY key. Include structure comments describing nested data.")
+    instance: str = dspy.InputField(
+        desc="Instance dict with STRUCTURE ANALYSIS showing exact types and nested keys for each field"
+    )
+    parse_code: str = dspy.OutputField(
+        desc="Python variable assignment statements using .get() with type-safe defaults for EVERY key. Include structure comments describing nested data."
+    )
 
 
 class GenerateOptimizationAlgorithm(dspy.Signature):
@@ -62,7 +68,7 @@ class GenerateOptimizationAlgorithm(dspy.Signature):
     HARD RULES (never violate):
     1. Define exactly one top-level function: `def solve(instance):`
     2. RETURN the solution (never print). The returned object MUST match the
-       "Reference Solution Structure" section from the requirement — same
+       "Required Return Schema" section from the requirement — same
        top-level field names and non-empty content.
     3. NEVER return an empty schedule / empty routes / cost=0 — such solutions
        are rejected with score=0.1.
@@ -80,13 +86,22 @@ class GenerateOptimizationAlgorithm(dspy.Signature):
     FORBIDDEN: os, sys, subprocess, socket, pickle, requests, urllib, importlib, ctypes.
 
     Choose the algorithm and problem-specific tactics yourself. The requirement
-    text contains the instance data (raw JSON) and reference solution structure —
+    text contains the instance data (raw JSON) and required return schema —
     read them carefully.
     """
-    requirement: str = dspy.InputField(desc="Full problem description including input/output format, instance data (raw JSON), and reference solution structure")
-    core_type: str = dspy.InputField(desc="Problem category (e.g., スケジューリング_混合整数計画, 配送・輸送_混合整数計画)")
-    parse_code: str = dspy.InputField(desc="Generic safe accessor helpers (get_list, get_dict, get_scalar). Instance keys are in the requirement text.")
-    algorithm_code: str = dspy.OutputField(desc="Complete Python source code defining `solve(instance)`. MUST return a NON-EMPTY solution matching the reference structure.")
+
+    requirement: str = dspy.InputField(
+        desc="Full problem description including input/output format, instance data (raw JSON), and required return schema"
+    )
+    core_type: str = dspy.InputField(
+        desc="Problem category (e.g., スケジューリング_混合整数計画, 配送・輸送_混合整数計画)"
+    )
+    parse_code: str = dspy.InputField(
+        desc="Generic safe accessor helpers (get_list, get_dict, get_scalar). Instance keys are in the requirement text."
+    )
+    algorithm_code: str = dspy.OutputField(
+        desc="Complete Python source code defining `solve(instance)`. MUST return a NON-EMPTY solution matching the required schema."
+    )
 
 
 class ImproveAlgorithm(dspy.Signature):
@@ -96,7 +111,7 @@ class ImproveAlgorithm(dspy.Signature):
     HARD RULES:
     1. Keep the signature `solve(instance)`.
     2. Address the SPECIFIC issues listed in the feedback (error type, missing
-       fields, empty output, timeout, worse-than-reference, etc.).
+       fields, empty output, timeout, worse-than-current-baseline, etc.).
     3. Never return empty containers or cost=inf as a "solution".
     4. Runtime budget: 30 seconds max.
 
@@ -107,9 +122,14 @@ class ImproveAlgorithm(dspy.Signature):
     Use the feedback to decide the next tactic (switch solver, add fallback,
     fix data access, change heuristic, etc.). Explain the reasoning briefly.
     """
+
     original_code: str = dspy.InputField(desc="Current algorithm code")
     parse_code: str = dspy.InputField(desc="Current parsing helpers")
-    feedback: str = dspy.InputField(desc="Diagnostic feedback: error category, cost gap vs reference, structural issues")
+    feedback: str = dspy.InputField(
+        desc="Diagnostic feedback: error category, cost gap vs reference, structural issues"
+    )
     core_type: str = dspy.InputField(desc="Problem category")
     improved_parse_code: str = dspy.OutputField(desc="Improved parsing helpers (or keep the same)")
-    improved_code: str = dspy.OutputField(desc="Improved solve(instance) code that addresses the feedback")
+    improved_code: str = dspy.OutputField(
+        desc="Improved solve(instance) code that addresses the feedback"
+    )

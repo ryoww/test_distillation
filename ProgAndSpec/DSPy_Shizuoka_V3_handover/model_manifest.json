@@ -1,0 +1,22 @@
+{
+  "generation": {
+    "model_id": "Qwen/Qwen3.6-27B",
+    "revision": "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9",
+    "api_base": "http://127.0.0.1:7501/v1"
+  },
+  "reflection": {
+    "model_id": "Qwen/Qwen3.8-27B",
+    "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "api_base": "http://127.0.0.1:7502/v1"
+  },
+  "serving": {
+    "runtime": "vllm==0.20.0",
+    "model_type": "qwen3_5",
+    "dtype": "bfloat16",
+    "max_model_len": 131072,
+    "mtp_num_speculative_tokens": 1,
+    "generation_max_tokens": 8192,
+    "verified_phase_e_input_tokens": 8905,
+    "verified_hardware": "NVIDIA H200 NVL"
+  }
+}

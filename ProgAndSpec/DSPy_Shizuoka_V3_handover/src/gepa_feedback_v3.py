@@ -5,12 +5,13 @@ reference_solutionとのギャップを明確に伝えることで、LLM が改�
 
 改善: core_typeに応じた具体的なアルゴリズム提案を追加。
 """
+
 from __future__ import annotations
 
 import dspy
 
-from .metrics_v3 import evaluate_algorithm_v3
 from . import best_known as _best_known_module
+from .metrics_v3 import evaluate_algorithm_v3
 
 # Global toggle: when False, the GEPA reward and feedback text must not use
 # the external reference value at all (reference-free / RL-style training).
@@ -22,6 +23,7 @@ def set_use_reference(flag: bool) -> None:
     """参照フリーモードの切替 (train スクリプトから設定)。"""
     global USE_REFERENCE
     USE_REFERENCE = bool(flag)
+
 
 # core_typeに応じた改善提案
 _ALGORITHM_HINTS = {
@@ -69,8 +71,8 @@ _ALGORITHM_HINTS = {
 
 def get_algorithm_hint(core_type: str) -> str:
     """core_typeに応じたアルゴリズム提案を返す。"""
-    return _ALGORITHM_HINTS.get(core_type,
-        "Try: OR-Tools CP-SAT solver, greedy heuristics, or local search improvements."
+    return _ALGORITHM_HINTS.get(
+        core_type, "Try: OR-Tools CP-SAT solver, greedy heuristics, or local search improvements."
     )
 
 
@@ -93,7 +95,9 @@ def summarize_ref_solution(ref_sol, hide_values: bool = False) -> str:
                 break
     for k, v in ref_sol.items():
         if isinstance(v, list) and v:
-            lines.append(f"  '{k}' is a list[{len(v)}] — your solution must have a non-empty list at this key.")
+            lines.append(
+                f"  '{k}' is a list[{len(v)}] — your solution must have a non-empty list at this key."
+            )
             break
         if isinstance(v, dict) and v:
             lines.append(f"  '{k}' is a dict with {len(v)} entries — non-empty required.")
@@ -113,15 +117,21 @@ def gepa_feedback_v3(example, pred, trace=None, pred_name=None, pred_trace=None)
     iid = getattr(example, "instance_id", None) or example.get("instance_id")
     ref = getattr(example, "reference_value", None) or example.get("reference_value")
     ref_sol = getattr(example, "reference_solution", None) or example.get("reference_solution", {})
-    objective_text = getattr(example, "objective", None) or (
-        example.get("objective", "") if hasattr(example, "get") else ""
-    ) or ""
+    objective_text = (
+        getattr(example, "objective", None)
+        or (example.get("objective", "") if hasattr(example, "get") else "")
+        or ""
+    )
 
     code = pred.algorithm_code
     reg = _best_known_module.registry
 
     result = evaluate_algorithm_v3(
-        code, inst, core_type, instance_id=iid, registry=reg,
+        code,
+        inst,
+        core_type,
+        instance_id=iid,
+        registry=reg,
         reference_value=ref,
         reference_solution=ref_sol,
         objective_text=objective_text,
@@ -143,7 +153,13 @@ def gepa_feedback_v3(example, pred, trace=None, pred_name=None, pred_trace=None)
 
     # Build bonus summary
     bonus_parts = []
-    for bonus_type in ["improvement", "incremental", "exact_match", "beat_reference", "exploration"]:
+    for bonus_type in [
+        "improvement",
+        "incremental",
+        "exact_match",
+        "beat_reference",
+        "exploration",
+    ]:
         if bonus_type in bonuses and bonuses[bonus_type] > 0:
             bonus_parts.append(f"{bonus_type}=+{bonuses[bonus_type]:.2f}")
     bonus_str = " ".join(bonus_parts) if bonus_parts else ""

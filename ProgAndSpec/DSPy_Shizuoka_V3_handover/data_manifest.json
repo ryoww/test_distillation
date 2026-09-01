@@ -1,0 +1,5 @@
+{
+  "files": 100,
+  "algorithm": "sha256 of sorted sha256sum lines",
+  "sha256": "ed2cc00fe61e7516f5ab982ea57207a394e5f66bc9e120521bd3ad5fd013e0a7"
+}

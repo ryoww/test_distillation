@@ -5,6 +5,7 @@ V2 v5: パースコードを学習可能なモジュールに。
 - generate: パースコード+問題文からアルゴリズムを生成
 - improve: フィードバックで両方を改善
 """
+
 from __future__ import annotations
 
 import re
@@ -26,7 +27,7 @@ def strip_code_fence(text: str) -> str:
     # unclosed fence: take everything after the opening fence
     m = _OPEN_FENCE.search(text)
     if m:
-        return text[m.end():].strip().rstrip("`").strip()
+        return text[m.end() :].strip().rstrip("`").strip()
     # bare 'python' language marker at start (no fence)
     if text.lower().startswith("python\n"):
         return text[7:].strip()
@@ -35,7 +36,7 @@ def strip_code_fence(text: str) -> str:
 
 def analyze_instance_structure(instance: dict) -> str:
     """Analyze instance structure and return a detailed description for the LLM.
-    
+
     Returns a STRUCTURE ANALYSIS block that clearly describes:
     - Each key's type (list, dict, scalar, string)
     - For lists: count and element type (list of dicts vs list of primitives)
@@ -46,7 +47,7 @@ def analyze_instance_structure(instance: dict) -> str:
     lines.append("STRUCTURE ANALYSIS:")
     lines.append("This section describes the EXACT data structure of each field.")
     lines.append("Use this information to write correct access patterns.\n")
-    
+
     for key in instance.keys():
         val = instance[key]
         if isinstance(val, list):
@@ -69,19 +70,19 @@ def analyze_instance_structure(instance: dict) -> str:
             lines.append(f"  Access: {key}['{list(val.keys())[0]}']")
         elif isinstance(val, (int, float)):
             lines.append(f"- {key}: scalar ({val})")
-            lines.append(f"  Access: use directly as number")
+            lines.append("  Access: use directly as number")
         elif isinstance(val, str):
             preview = val[:50] if len(val) > 50 else val
-            lines.append(f"- {key}: string \"{preview}\"")
+            lines.append(f'- {key}: string "{preview}"')
         else:
             lines.append(f"- {key}: {type(val).__name__}")
-    
+
     return "\n".join(lines)
 
 
 def default_parse_code(instance: dict) -> str:
     """Generate parse code from instance keys - covers ALL keys with type info and safe access.
-    
+
     Returns parse code with:
     - Type-annotated variable extraction using .get() for safety
     - Safe access helpers (get_list, get_dict, get_scalar)
@@ -102,14 +103,14 @@ def default_parse_code(instance: dict) -> str:
     lines.append("    return val if isinstance(val, (int, float)) else default")
     lines.append("")
     lines.append("# Variable extraction with type info")
-    
+
     for key in instance.keys():
         val = instance[key]
         # Sanitize key name for Python variable
         var_name = key.replace("-", "_").replace(" ", "_")
         if var_name and not (var_name[0].isalpha() or var_name[0] == "_"):
             var_name = "v_" + var_name
-        
+
         if isinstance(val, list):
             if val and isinstance(val[0], dict):
                 sub_keys = ", ".join(val[0].keys()) if val else "empty"
@@ -126,7 +127,7 @@ def default_parse_code(instance: dict) -> str:
             comment = f"# scalar ({val})"
             lines.append(f"{var_name} = instance.get('{key}', {val})  {comment}")
         elif isinstance(val, str):
-            comment = f"# string"
+            comment = "# string"
             lines.append(f"{var_name} = instance.get('{key}', '')  {comment}")
         else:
             comment = f"# {type(val).__name__}"
@@ -136,7 +137,7 @@ def default_parse_code(instance: dict) -> str:
 
 class AlgorithmGenerator(dspy.Module):
     """要件と問題タイプを受けて `solve(instance)` の Python コードを返す。
-    
+
     v6: 2段階アプローチ。
     - Phase 1: parse_codeを生成して固定
     - Phase 2: 固定されたparse_codeでalgorithm_codeだけを学習
@@ -157,7 +158,7 @@ class AlgorithmGenerator(dspy.Module):
 
     def forward(self, requirement: str, core_type: str, **kwargs) -> dspy.Prediction:
         """Generate solve() code.
-        
+
         NOTE: `instance` is NOT in with_inputs, so it's not passed during GEPA compile.
         Instance data is embedded in `requirement` via requirement_builder.
         We use a generic parse_code (LLM will figure out actual keys from requirement text).
@@ -193,7 +194,9 @@ class AlgorithmGenerator(dspy.Module):
             rationale=getattr(out, "rationale", ""),
         )
 
-    def improve_forward(self, original_code: str, parse_code: str, feedback: str, core_type: str) -> dspy.Prediction:
+    def improve_forward(
+        self, original_code: str, parse_code: str, feedback: str, core_type: str
+    ) -> dspy.Prediction:
         """フィードバックに基づいてアルゴリズムを改善（パースは固定）。"""
         out = self.improve(
             original_code=original_code,
