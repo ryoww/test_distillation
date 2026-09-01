@@ -49,6 +49,8 @@ from src.lm_config import (
 )
 from src.metrics_v3 import evaluate_algorithm_v3
 from src.modules import AlgorithmGenerator, default_parse_code
+from src.requirement_builder import summarize_reference_solution
+from src.verify_loop import generate_verified, summarize_attempts
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -276,7 +278,13 @@ def run_gepa_training(
     return compiled
 
 
-def evaluate(compiled, raw_examples, name="Test", use_reference=True):
+def evaluate(
+    compiled,
+    raw_examples,
+    name="Test",
+    use_reference=True,
+    max_repair_attempts=1,
+):
     """評価: 各インスタンスに対してアルゴリズムを生成してスコアを計算。
 
     use_reference=False でも、参考値との比較 (beat-reference) は
@@ -304,8 +312,24 @@ def evaluate(compiled, raw_examples, name="Test", use_reference=True):
 
         # Generate algorithm - only pass inputs defined in with_inputs()
         try:
-            pred = compiled(requirement=requirement, core_type=core_type)
-            code = pred.algorithm_code
+            if max_repair_attempts > 1:
+                # 返却フィールド名と型だけを渡す。目的値は include_values=False で落ちる。
+                return_schema = summarize_reference_solution(
+                    ref_sol, instance, include_values=False
+                )
+                code, _, attempts = generate_verified(
+                    compiled,
+                    requirement=requirement,
+                    core_type=core_type,
+                    instance=instance,
+                    max_attempts=max_repair_attempts,
+                    return_schema=return_schema,
+                )
+                repair = summarize_attempts(attempts)
+            else:
+                pred = compiled(requirement=requirement, core_type=core_type)
+                code = pred.algorithm_code
+                repair = None
         except Exception as e:
             logger.warning(f"  [{i + 1}/{len(raw_examples)}] {iid}: Generation failed: {e}")
             parse_errors += 1
@@ -383,6 +407,8 @@ def evaluate(compiled, raw_examples, name="Test", use_reference=True):
                 "detail": result.get("detail", ""),
                 "error_category": result.get("error_category", ""),
                 "feasibility_verified": result.get("feasibility_verified", False),
+                # first-pass と修復後は別指標なので、混ぜずに残す。
+                "repair": repair,
                 "code": code,
             }
         )
@@ -475,6 +501,12 @@ def parse_args(argv=None):
     )
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    parser.add_argument(
+        "--max-repair-attempts",
+        type=int,
+        default=1,
+        help="1 keeps single-shot generation. 2+ verifies the solution and asks for a fix.",
+    )
     parser.add_argument(
         "--no-thinking",
         dest="enable_thinking",
@@ -602,7 +634,13 @@ def main(argv=None):
             train_result = evaluate(
                 compiled, train_only_raw + val_raw, name="Train", use_reference=use_reference
             )
-            test_result = evaluate(compiled, test_raw, name="Test", use_reference=use_reference)
+            test_result = evaluate(
+                compiled,
+                test_raw,
+                name="Test",
+                use_reference=use_reference,
+                max_repair_attempts=args.max_repair_attempts,
+            )
         else:
             logger.error(f"No compiled program found at {program_path}. Run without --eval-only.")
             sys.exit(1)
@@ -636,7 +674,13 @@ def main(argv=None):
         train_result = evaluate(
             compiled, train_only_raw + val_raw, name="Train", use_reference=use_reference
         )
-        test_result = evaluate(compiled, test_raw, name="Test", use_reference=use_reference)
+        test_result = evaluate(
+            compiled,
+            test_raw,
+            name="Test",
+            use_reference=use_reference,
+            max_repair_attempts=args.max_repair_attempts,
+        )
 
     results_path = run_dir / f"evaluation_results_v3_gepa_{out_tag}.json"
     results = {

@@ -129,6 +129,12 @@ class ImproveAlgorithm(dspy.Signature):
         desc="Diagnostic feedback: error category, cost gap vs reference, structural issues"
     )
     core_type: str = dspy.InputField(desc="Problem category")
+    return_schema: str = dspy.InputField(
+        desc=(
+            "Required return schema: the top-level field names and types solve() must "
+            "return. Contains no target value."
+        )
+    )
     improved_parse_code: str = dspy.OutputField(desc="Improved parsing helpers (or keep the same)")
     improved_code: str = dspy.OutputField(
         desc="Improved solve(instance) code that addresses the feedback"

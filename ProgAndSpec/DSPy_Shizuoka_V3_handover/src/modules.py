@@ -195,14 +195,25 @@ class AlgorithmGenerator(dspy.Module):
         )
 
     def improve_forward(
-        self, original_code: str, parse_code: str, feedback: str, core_type: str
+        self,
+        original_code: str,
+        parse_code: str,
+        feedback: str,
+        core_type: str,
+        return_schema: str = "",
     ) -> dspy.Prediction:
-        """フィードバックに基づいてアルゴリズムを改善（パースは固定）。"""
+        """フィードバックに基づいてアルゴリズムを改善（パースは固定）。
+
+        return_schema は返却フィールド名と型だけを持ち、目的値は含まない。
+        Why pass it here: 直す側は requirement を受け取らないため、これが無いと
+        「どんな形で返すべきか」を知らないまま形式エラーを直すことになる。
+        """
         out = self.improve(
             original_code=original_code,
             parse_code=parse_code,
             feedback=feedback,
             core_type=core_type,
+            return_schema=return_schema,
         )
         improved_code = strip_code_fence(out.improved_code)
         return dspy.Prediction(
