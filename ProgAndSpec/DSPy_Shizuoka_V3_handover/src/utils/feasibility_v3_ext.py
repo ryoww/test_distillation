@@ -169,6 +169,49 @@ def _num_list(value: Any) -> list[float] | None:
     return out
 
 
+def _pair_list(
+    value: Any, first: Sequence[str], second: Sequence[str]
+) -> list[tuple[int, int]] | None:
+    """マッチング等の組を (a, b) のリストへ正規化する。
+
+    モデルは ``[{"left": 0, "right": 1}]`` とも ``[[0, 1]]`` とも返すため、
+    どちらも受ける。1件でも解釈できない要素があれば None を返し、
+    呼び出し側は unverified として扱う。
+    """
+    if not isinstance(value, (list, tuple)):
+        return None
+    out: list[tuple[int, int]] = []
+    for entry in value:
+        if isinstance(entry, dict):
+            a = next((_num(entry[k]) for k in first if k in entry), None)
+            b = next((_num(entry[k]) for k in second if k in entry), None)
+        elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+            a, b = _num(entry[0]), _num(entry[1])
+        else:
+            return None
+        if a is None or b is None:
+            return None
+        out.append((int(a), int(b)))
+    return out
+
+
+def _period_series(value: Any, field_names: Sequence[str]) -> list[float] | None:
+    """期別の系列を取り出す。数値の配列と dict の配列の両方を受ける。"""
+    if isinstance(value, dict):
+        value = [value[k] for k in sorted(value, key=lambda k: _num(k) or 0)]
+    if not isinstance(value, (list, tuple)) or not value:
+        return None
+    if all(isinstance(v, dict) for v in value):
+        out: list[float] = []
+        for entry in value:
+            found = next((_num(entry[k]) for k in field_names if k in entry), None)
+            if found is None:
+                return None
+            out.append(found)
+        return out
+    return _num_list(value)
+
+
 def _index_map(value: Any) -> dict[int, Any] | None:
     """{"0": x, "1": y} 形式や [x, y] 形式を dict[int, Any] へ正規化する。"""
     if isinstance(value, dict):
@@ -1210,14 +1253,15 @@ def check_assignment_ip(instance: dict, solution: Any) -> dict:
         used: set[tuple[int, int]] = set()
         total_pref = 0.0
         for course, slot_info in assignment.items():
-            if not isinstance(slot_info, dict):
-                violations.append(f"course {course} assignment is not an object")
-                continue
-            room = _num(slot_info.get("room"))
-            slot = _num(slot_info.get("slot"))
+            if isinstance(slot_info, dict):
+                room = _num(slot_info.get("room"))
+                slot = _num(slot_info.get("slot"))
+            elif isinstance(slot_info, (list, tuple)) and len(slot_info) >= 2:
+                room, slot = _num(slot_info[0]), _num(slot_info[1])
+            else:
+                return _unverified("classroom assignment is not (room, slot)")
             if room is None or slot is None:
-                violations.append(f"course {course} missing room or slot")
-                continue
+                return _unverified("classroom assignment is missing room or slot")
             room, slot = int(room), int(slot)
             if (room, slot) in used:
                 violations.append(f"room {room} double-booked at slot {slot}")
@@ -1241,27 +1285,21 @@ def check_assignment_ip(instance: dict, solution: Any) -> dict:
     # 選択的割当: エージェントと仕事が重複しないマッチング。
     profit_matrix = instance.get("profit_matrix")
     if profit_matrix is not None:
-        pairs = _pick(solution, "pairs", "assignment", "matching")
-        if not isinstance(pairs, list):
-            return _unverified("selective assignment without pairs")
+        pairs = _pair_list(
+            _pick(solution, "pairs", "assignment", "matching"),
+            ("agent", "a", "worker", "left"),
+            ("job", "j", "task", "right"),
+        )
+        if pairs is None:
+            return _unverified("selective assignment entries are not (agent, job) pairs")
         agents: list[int] = []
         jobs: list[int] = []
         total = 0.0
-        for pair in pairs:
-            if not isinstance(pair, dict):
-                violations.append("pair entry is not an object")
-                continue
-            agent = _num(pair.get("agent"))
-            job = _num(pair.get("job"))
-            if agent is None or job is None:
-                violations.append(f"pair {pair} missing agent or job")
-                continue
-            agents.append(int(agent))
-            jobs.append(int(job))
-            if 0 <= int(agent) < len(profit_matrix) and 0 <= int(job) < len(
-                profit_matrix[int(agent)]
-            ):
-                total += _num(profit_matrix[int(agent)][int(job)]) or 0.0
+        for agent, job in pairs:
+            agents.append(agent)
+            jobs.append(job)
+            if 0 <= agent < len(profit_matrix) and 0 <= job < len(profit_matrix[agent]):
+                total += _num(profit_matrix[agent][job]) or 0.0
         _distinct_indices(agents, len(profit_matrix), "paired agents", violations)
         _distinct_indices(
             jobs, len(profit_matrix[0]) if profit_matrix else 0, "paired jobs", violations
@@ -1455,19 +1493,18 @@ def check_matching_combinatorial(instance: dict, solution: Any) -> dict:
         for edge in edges:
             if isinstance(edge, dict):
                 lookup[(edge.get("left"), edge.get("right"))] = _num(edge.get("weight")) or 0.0
+        pairs = _pair_list(matching, ("left", "l", "u", "worker"), ("right", "r", "v", "task"))
+        if pairs is None:
+            return _unverified("bipartite matching entries are not (left, right) pairs")
         lefts: list[int] = []
         rights: list[int] = []
         total = 0.0
-        for pair in matching:
-            if not isinstance(pair, dict):
-                violations.append("matching entry is not an object")
-                continue
-            left, right = pair.get("left"), pair.get("right")
+        for left, right in pairs:
             if (left, right) not in lookup:
                 violations.append(f"edge ({left}, {right}) does not exist")
                 continue
-            lefts.append(int(left))
-            rights.append(int(right))
+            lefts.append(left)
+            rights.append(right)
             total += lookup[(left, right)]
         _distinct_indices(
             lefts, int(_num(instance.get("num_left")) or 0), "matched left", violations
@@ -1606,20 +1643,30 @@ def check_composite_milp(instance: dict, solution: Any) -> dict:
         schedule = _index_map(_pick(solution, "schedule", "plan", "commitment"))
         if schedule is None:
             return _unverified("unit commitment without a schedule")
-        supply = [0.0] * len(demand)
+        # 各号機の系列は {"on": [...], "output": [...]}、出力だけの配列、
+        # [{"period": t, "output": o}] のいずれでも返ってくる。
+        normalised: dict[int, tuple[list[float], list[float]]] = {}
         for unit_id, entry in schedule.items():
-            if not isinstance(entry, dict):
-                violations.append(f"unit {unit_id} schedule is not an object")
-                continue
-            on = _num_list(entry.get("on")) or []
-            output = _num_list(entry.get("output")) or []
+            if isinstance(entry, dict) and ("output" in entry or "on" in entry):
+                output = _num_list(entry.get("output")) or []
+                on = _num_list(entry.get("on")) or []
+            else:
+                output = _period_series(entry, ("output", "production", "power")) or []
+                on = _period_series(entry, ("on", "running", "committed")) or []
+            if not output:
+                return _unverified("unit commitment schedule has no output series")
+            normalised[unit_id] = (output, on)
+
+        supply = [0.0] * len(demand)
+        for unit_id, (output, on) in normalised.items():
             if not 0 <= unit_id < len(units):
                 violations.append(f"unknown unit {unit_id}")
                 continue
             low = _num(units[unit_id].get("min")) or 0.0
             high = _num(units[unit_id].get("max")) or 0.0
             for period, produced in enumerate(output):
-                running = bool(on[period]) if period < len(on) else produced > 0
+                # on が無い出力だけの系列では、正の出力を稼働とみなす。
+                running = bool(on[period]) if period < len(on) else produced > _ABS_TOL
                 if running and not (low - _ABS_TOL <= produced <= high + _ABS_TOL):
                     violations.append(
                         f"unit {unit_id} period {period} output {produced:g} outside "
@@ -1637,16 +1684,17 @@ def check_composite_milp(instance: dict, solution: Any) -> dict:
                     f"period {period} supply {supply[period]:g} below demand {needed:g}"
                 )
         spend = 0.0
-        for unit_id, entry in schedule.items():
-            if not isinstance(entry, dict) or not 0 <= unit_id < len(units):
+        for unit_id, (output, on) in normalised.items():
+            if not 0 <= unit_id < len(units):
                 continue
             unit = units[unit_id]
-            spend += (_num(unit.get("cost")) or 0.0) * sum(_num_list(entry.get("output")) or [])
-            previous = 0.0
-            for flag in _num_list(entry.get("on")) or []:
-                if flag and not previous:
+            spend += (_num(unit.get("cost")) or 0.0) * sum(output)
+            previous = False
+            for period, produced in enumerate(output):
+                running = bool(on[period]) if period < len(on) else produced > _ABS_TOL
+                if running and not previous:
                     spend += _num(unit.get("startup")) or 0.0
-                previous = flag
+                previous = running
         claimed = _num(_pick(solution, "min_cost", "total_cost", "objective_value"))
         if claimed is not None and not _close_soft(claimed, spend):
             violations.append(f"min_cost {claimed:g} != cost of this schedule {spend:g}")
@@ -1777,18 +1825,41 @@ def check_composite_lp(instance: dict, solution: Any) -> dict:
     if "num_plants" in instance and "transport_cost" in instance:
         needs = _num_list(demand) or []
         capacity = _num_list(instance.get("capacity")) or []
-        shipments = _index_map(_pick(solution, "shipments", "shipment", "plan"))
-        if shipments is None:
-            return _unverified("production distribution without shipments")
+        raw = _pick(solution, "shipments", "shipment", "plan")
+        # 工場×顧客の行列、入れ子 dict、[{plant, customer, amount}] のいずれもある。
+        flows: dict[int, dict[int, float]] = {}
+        if isinstance(raw, list) and raw and all(isinstance(e, dict) for e in raw):
+            if all("plant" in e or "from" in e for e in raw):
+                for entry in raw:
+                    plant = _num(entry.get("plant", entry.get("from")))
+                    customer = _num(entry.get("customer", entry.get("to")))
+                    amount = next(
+                        (
+                            _num(entry[k])
+                            for k in ("amount", "quantity", "qty", "flow")
+                            if k in entry
+                        ),
+                        None,
+                    )
+                    if plant is None or customer is None or amount is None:
+                        return _unverified("shipment entries lack plant, customer or amount")
+                    flows.setdefault(int(plant), {})[int(customer)] = amount
+            else:
+                return _unverified("shipment entries are not plant/customer records")
+        else:
+            outer = _index_map(raw)
+            if outer is None:
+                return _unverified("production distribution without shipments")
+            for plant, row in outer.items():
+                per_customer = _index_map(row)
+                if per_customer is None:
+                    return _unverified("shipment rows are not customer mappings")
+                flows[plant] = {c: _num(q) or 0.0 for c, q in per_customer.items()}
+
         received = [0.0] * len(needs)
-        for plant, row in shipments.items():
-            per_customer = _index_map(row)
-            if per_customer is None:
-                violations.append(f"plant {plant} shipments are not a mapping")
-                continue
+        for plant, row in flows.items():
             shipped = 0.0
-            for customer, qty_raw in per_customer.items():
-                qty = _num(qty_raw) or 0.0
+            for customer, qty in row.items():
                 if qty < -_ABS_TOL:
                     violations.append(f"negative shipment {qty:g} from plant {plant}")
                 shipped += qty
@@ -1806,11 +1877,10 @@ def check_composite_lp(instance: dict, solution: Any) -> dict:
         production_cost = _num_list(instance.get("production_cost")) or []
         transport_cost = instance.get("transport_cost") or []
         spend = 0.0
-        for plant, row in shipments.items():
-            for customer, qty_raw in (_index_map(row) or {}).items():
-                qty = _num(qty_raw) or 0.0
-                unit = production_cost[plant] if plant < len(production_cost) else 0.0
-                if plant < len(transport_cost) and customer < len(transport_cost[plant]):
+        for plant, row in flows.items():
+            for customer, qty in row.items():
+                unit = production_cost[plant] if 0 <= plant < len(production_cost) else 0.0
+                if 0 <= plant < len(transport_cost) and customer < len(transport_cost[plant]):
                     unit += _num(transport_cost[plant][customer]) or 0.0
                 spend += qty * unit
         claimed = _num(_pick(solution, "min_total_cost", "total_cost", "objective_value"))
@@ -2063,40 +2133,45 @@ def check_production_ip(instance: dict, solution: Any) -> dict:
     if requirement is not None:
         initial = _num(instance.get("initial_workforce")) or 0.0
         plan = _pick(solution, "plan", "schedule", "workforce_plan")
-        if not isinstance(plan, list) or not plan:
-            return _unverified("workforce plan without per-period entries")
+        # 期別の人員だけを配列で返す実装と、採用・解雇まで含む dict 配列がある。
+        levels = _period_series(plan, ("workforce", "staff", "headcount", "employees"))
+        if levels is None:
+            return _unverified("workforce plan without a per-period workforce series")
+        entries = plan if isinstance(plan, list) and all(isinstance(e, dict) for e in plan) else []
         previous = initial
-        for entry in plan:
-            if not isinstance(entry, dict):
-                return _unverified("workforce plan entries are not objects")
-            period = int(_num(entry.get("period")) or 0)
-            workforce = _num(entry.get("workforce")) or 0.0
-            hire = _num(entry.get("hire")) or 0.0
-            fire = _num(entry.get("fire")) or 0.0
+        spend = 0.0
+        for period, workforce in enumerate(levels):
             if period < len(requirement) and workforce + _ABS_TOL < requirement[period]:
                 violations.append(
                     f"period {period} workforce {workforce:g} below requirement "
                     f"{requirement[period]:g}"
                 )
+            entry = entries[period] if period < len(entries) else {}
+            hire = next((_num(entry[k]) for k in ("hire", "hires", "hired") if k in entry), None)
+            fire = next((_num(entry[k]) for k in ("fire", "fires", "fired") if k in entry), None)
+            # 採用・解雇が省略された解では、人員の増減から復元する。
+            derived = workforce - previous
+            if hire is None:
+                hire = max(derived, 0.0)
+            if fire is None:
+                fire = max(-derived, 0.0)
             if hire < -_ABS_TOL or fire < -_ABS_TOL:
                 violations.append(f"period {period} has a negative hire/fire count")
-            if not _close(workforce, previous + hire - fire):
+            if not _close_soft(workforce, previous + hire - fire):
                 violations.append(
                     f"period {period} workforce {workforce:g} != previous {previous:g} "
                     f"+ hire {hire:g} - fire {fire:g}"
                 )
+            spend += (
+                (_num(instance.get("hire_cost")) or 0.0) * hire
+                + (_num(instance.get("fire_cost")) or 0.0) * fire
+                + (_num(instance.get("wage")) or 0.0) * workforce
+            )
             previous = workforce
-        spend = sum(
-            (_num(instance.get("hire_cost")) or 0.0) * (_num(e.get("hire")) or 0.0)
-            + (_num(instance.get("fire_cost")) or 0.0) * (_num(e.get("fire")) or 0.0)
-            + (_num(instance.get("wage")) or 0.0) * (_num(e.get("workforce")) or 0.0)
-            for e in plan
-            if isinstance(e, dict)
-        )
         claimed = _num(_pick(solution, "min_cost", "total_cost", "objective_value"))
         if claimed is not None and not _close_soft(claimed, spend):
             violations.append(f"min_cost {claimed:g} != cost of this plan {spend:g}")
-        return _result(violations, len(plan) + 2, cost=spend)
+        return _result(violations, len(levels) + 2, cost=spend)
 
     # 発注ロット最適化: 選択ロットが候補にあり、累積供給が需要を満たす。
     lot_choices = _num_list(instance.get("lot_choices"))
@@ -2280,7 +2355,25 @@ def check_finance_lp(instance: dict, solution: Any) -> dict:
     # キャッシュフローマッチング: 保有量が非負で、費用が価格と一致する。
     bonds = instance.get("bonds")
     if bonds is not None:
-        holdings = _index_map(_pick(solution, "bond_holdings", "holdings", "portfolio"))
+        raw_holdings = _pick(solution, "bond_holdings", "holdings", "portfolio")
+        if isinstance(raw_holdings, list) and all(isinstance(e, dict) for e in raw_holdings):
+            rebuilt: dict[int, Any] = {}
+            for entry in raw_holdings:
+                bond_id = _num(entry.get("id", entry.get("bond")))
+                amount = next(
+                    (
+                        _num(entry[k])
+                        for k in ("quantity", "amount", "units", "holding")
+                        if k in entry
+                    ),
+                    None,
+                )
+                if bond_id is None or amount is None:
+                    return _unverified("bond holdings entries lack id or quantity")
+                rebuilt[int(bond_id)] = amount
+            holdings = rebuilt
+        else:
+            holdings = _index_map(raw_holdings)
         if holdings is None:
             return _unverified("cash flow matching without bond holdings")
         spend = 0.0

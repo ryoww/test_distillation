@@ -182,3 +182,145 @@ def test_strip_packing_rejects_overlap():
     result = _check(record, {"placement": stacked, "min_height": 99})
     assert result["feasible"] is False
     assert any("overlap" in v for v in result["violations"])
+
+
+# --- 実際のモデル出力で観測された形状ゆれ ---
+#
+# 参照解と違う形で返された正解を infeasible に落とすと、未検証のまま放置するより
+# 悪い結果になる。観測済みの形をここで固定する。
+
+
+def _problem(problem_id: int) -> dict:
+    return next(r for r in EXT_PROBLEMS if r["id"] == problem_id)
+
+
+def test_unit_commitment_accepts_an_output_only_series():
+    record = _problem(100)
+    reference = record["reference_solution"]["schedule"]
+    schedule = {unit: entry["output"] for unit, entry in reference.items()}
+    result = _check(
+        record, {"min_cost": record["reference_solution"]["min_cost"], "schedule": schedule}
+    )
+    assert result["verified"] is True
+    assert result["feasible"] is True, result["violations"]
+
+
+def test_unit_commitment_accepts_per_period_records():
+    record = _problem(100)
+    reference = record["reference_solution"]["schedule"]
+    schedule = {
+        unit: [
+            {"period": period, "output": value, "on": bool(entry["on"][period])}
+            for period, value in enumerate(entry["output"])
+        ]
+        for unit, entry in reference.items()
+    }
+    result = _check(
+        record, {"min_cost": record["reference_solution"]["min_cost"], "schedule": schedule}
+    )
+    assert result["verified"] is True
+    assert result["feasible"] is True, result["violations"]
+
+
+def test_bipartite_matching_accepts_plain_pairs():
+    record = _problem(70)
+    reference = record["reference_solution"]
+    pairs = [[m["left"], m["right"]] for m in reference["matching"]]
+    result = _check(record, {"max_weight": reference["max_weight"], "matching": pairs})
+    assert result["verified"] is True
+    assert result["feasible"] is True, result["violations"]
+
+
+def test_selective_assignment_accepts_plain_pairs():
+    record = _problem(76)
+    reference = record["reference_solution"]
+    pairs = [[p["agent"], p["job"]] for p in reference["pairs"]]
+    result = _check(record, {"max_profit": reference["max_profit"], "pairs": pairs})
+    assert result["verified"] is True
+    assert result["feasible"] is True, result["violations"]
+
+
+def test_classroom_assignment_accepts_room_slot_pairs():
+    record = _problem(75)
+    reference = record["reference_solution"]
+    assignment = {course: [v["room"], v["slot"]] for course, v in reference["assignment"].items()}
+    result = _check(
+        record, {"max_preference": reference["max_preference"], "assignment": assignment}
+    )
+    assert result["verified"] is True
+    assert result["feasible"] is True, result["violations"]
+
+
+def test_bond_holdings_accept_id_quantity_records():
+    record = _problem(82)
+    reference = record["reference_solution"]
+    holdings = [
+        {"id": int(bond), "quantity": amount} for bond, amount in reference["bond_holdings"].items()
+    ]
+    result = _check(record, {"min_cost": reference["min_cost"], "bond_holdings": holdings})
+    assert result["verified"] is True
+    assert result["feasible"] is True, result["violations"]
+
+
+def test_workforce_plan_accepts_a_bare_level_series():
+    record = _problem(85)
+    reference = record["reference_solution"]
+    levels = [entry["workforce"] for entry in reference["plan"]]
+    result = _check(record, {"min_cost": reference["min_cost"], "plan": levels})
+    assert result["verified"] is True
+    assert result["feasible"] is True, result["violations"]
+
+
+def test_workforce_plan_accepts_plural_hire_and_fire_keys():
+    record = _problem(85)
+    reference = record["reference_solution"]
+    plan = [
+        {
+            "period": entry["period"] + 1,
+            "workforce": entry["workforce"],
+            "hires": entry["hire"],
+            "fires": entry["fire"],
+        }
+        for entry in reference["plan"]
+    ]
+    result = _check(record, {"min_cost": reference["min_cost"], "plan": plan})
+    assert result["verified"] is True
+    assert result["feasible"] is True, result["violations"]
+
+
+def test_shipments_accept_a_plant_by_customer_matrix():
+    record = _problem(94)
+    reference = record["reference_solution"]
+    plants = record["instance"]["num_plants"]
+    customers = record["instance"]["num_customers"]
+    matrix = [[0.0] * customers for _ in range(plants)]
+    for plant, row in reference["shipments"].items():
+        for customer, qty in row.items():
+            matrix[int(plant)][int(customer)] = qty
+    result = _check(record, {"min_total_cost": reference["min_total_cost"], "shipments": matrix})
+    assert result["verified"] is True
+    assert result["feasible"] is True, result["violations"]
+
+
+def test_shipments_accept_flow_records():
+    record = _problem(94)
+    reference = record["reference_solution"]
+    flows = [
+        {"plant": int(plant), "customer": int(customer), "amount": qty}
+        for plant, row in reference["shipments"].items()
+        for customer, qty in row.items()
+    ]
+    result = _check(record, {"min_total_cost": reference["min_total_cost"], "shipments": flows})
+    assert result["verified"] is True
+    assert result["feasible"] is True, result["violations"]
+
+
+def test_cash_flow_rejects_a_sentinel_cost_that_contradicts_the_holdings():
+    """実測で出た「緊急フォールバック」解。保有量と申告費用が食い違う。"""
+    record = _problem(82)
+    result = _check(
+        record,
+        {"min_cost": 9999.0, "feasible": False, "bond_holdings": {"0": 10.0, "1": 10.0, "2": 10.0}},
+    )
+    assert result["verified"] is True
+    assert result["feasible"] is False
