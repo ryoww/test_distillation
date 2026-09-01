@@ -107,7 +107,9 @@ def check_feasibility_detailed(core_type: str, instance: dict, solution: Any) ->
             result["total_constraints"] = 0
         if "violations" not in result:
             result["violations"] = []
-        result["verified"] = True
+        # Why not force True: チェッカー自身が形状を判定できず verified=False を返すことがあり、
+        # それを上書きすると未検証の解へ満点を与えてしまう。
+        result.setdefault("verified", True)
         return result
     except Exception as e:
         return {
@@ -645,3 +647,10 @@ register_feasibility_check_detailed(
 )
 register_feasibility_check_detailed("配送・輸送_混合整数計画", check_vrp_v3_detailed)
 register_feasibility_check_detailed("配送・輸送_確率最適化", check_vrp_v3_detailed)
+
+# 残り20 core_type ぶんのチェッカーは別モジュールに置き、ここで一括登録する。
+# Why not import at the top: 循環importを避けるため、登録関数の定義後に読み込む。
+from .feasibility_v3_ext import EXTRA_CHECKERS
+
+for _core_type, _checker in EXTRA_CHECKERS.items():
+    register_feasibility_check_detailed(_core_type, _checker)
