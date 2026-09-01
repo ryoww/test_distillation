@@ -91,7 +91,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--program-path", type=Path)
     parser.add_argument("--output-dir", type=Path, default=BASE_DIR / "outputs" / "model_scores")
     parser.add_argument("--run-name")
-    parser.add_argument("--max-tokens", type=_positive_int, default=8192)
+    parser.add_argument("--max-tokens", type=_positive_int, default=32768)
     parser.add_argument("--lm-timeout", type=_positive_int, default=1800)
     parser.add_argument(
         "--temperature",

@@ -71,7 +71,8 @@ HF_HOME="$QWEN_HF_HOME" CUDA_VISIBLE_DEVICES=0 uv run scripts/serve_vllm.py \
   --speculative-config '{"method":"mtp","num_speculative_tokens":1}' \
   --gpu-memory-utilization 0.85 \
   --no-enable-log-requests --disable-log-stats \
-  --disable-uvicorn-access-log --generation-config vllm
+  --disable-uvicorn-access-log --generation-config vllm \
+  --reasoning-parser qwen3
 ```
 
 reflection server:
@@ -90,14 +91,28 @@ uv run scripts/serve_vllm.py \
   --gpu-memory-utilization 0.85 \
   --max-num-seqs 16 \
   --no-enable-log-requests --disable-log-stats \
-  --disable-uvicorn-access-log --generation-config vllm
+  --disable-uvicorn-access-log --generation-config vllm \
+  --reasoning-parser qwen3
 ```
 
 初回は重みロード後に `torch.compile` とCUDA graph warmupが走ります。この環境では
 両モデルをGPU 1で個別起動し、`/v1/models` とDSPy chat completionを確認済みです。
 Qwen3.6-27Bは起動完了まで約4分36秒、Qwen3.8-27Bは約4分半で、どちらも
-モデル重みのGPU使用量は51.1 GiBでした。Qwen3.6-27Bは短い指示でも思考文を生成する
-ため、実験では既定の8192 output tokensと1800秒timeoutを維持します。
+モデル重みのGPU使用量は51.1 GiBでした。
+
+### thinkingの扱い
+
+Qwen3系のchat templateは`enable_thinking`が未指定なら思考を開きます。本実験は
+指定を送らないので、**thinkingは有効のまま**です。切る場合は
+`train_gepa_v3.py --no-thinking` か `DSPY_GENERATION_ENABLE_THINKING=0` を使います。
+
+`--reasoning-parser qwen3` を付けると、思考文は`content`ではなく
+`reasoning_content`へ分離されます。付けないと`<think>`が本文に混ざったまま
+DSPyのJSONAdapterへ渡り、構造化出力のパースを妨げます。
+
+出力枠は思考文と最終出力の合計です。既定を32,768 tokensにしており、上限は
+`max_model_len` から入力長を引いた値です（Phase Eの先頭問題で入力8,905 tokens）。
+timeoutは1800秒を維持します。
 
 保存済みPhase Eプログラムの先頭問題は、Qwen3.6 tokenizerで入力8,905 tokensでした。
 context長は入力と最大出力の合計を収める必要があるため、比較時は131072を指定します。
@@ -212,7 +227,8 @@ uv run scripts/serve_vllm.py \
   --gpu-memory-utilization 0.85 \
   --max-num-seqs 16 \
   --no-enable-log-requests --disable-log-stats \
-  --disable-uvicorn-access-log --generation-config vllm
+  --disable-uvicorn-access-log --generation-config vllm \
+  --reasoning-parser qwen3
 ```
 
 端末Bで、サーバーの起動完了後にQwen3.6の改善前後を評価します。
@@ -245,7 +261,8 @@ HF_HOME="$QWEN_HF_HOME" CUDA_VISIBLE_DEVICES=1 uv run scripts/serve_vllm.py \
   --speculative-config '{"method":"mtp","num_speculative_tokens":1}' \
   --gpu-memory-utilization 0.85 \
   --no-enable-log-requests --disable-log-stats \
-  --disable-uvicorn-access-log --generation-config vllm
+  --disable-uvicorn-access-log --generation-config vllm \
+  --reasoning-parser qwen3
 ```
 
 端末Bで、サーバーの起動完了後にQwen3.8の改善前後を評価します。

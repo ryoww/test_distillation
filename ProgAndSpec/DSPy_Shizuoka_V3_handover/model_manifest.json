@@ -15,8 +15,10 @@
     "dtype": "bfloat16",
     "max_model_len": 131072,
     "mtp_num_speculative_tokens": 1,
-    "generation_max_tokens": 8192,
+    "generation_max_tokens": 32768,
     "verified_phase_e_input_tokens": 8905,
-    "verified_hardware": "NVIDIA H200 NVL"
+    "verified_hardware": "NVIDIA H200 NVL",
+    "reasoning_parser": "qwen3",
+    "enable_thinking": "chat template default (on)"
   }
 }

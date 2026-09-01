@@ -41,6 +41,7 @@ from src.gepa_feedback_v3 import gepa_feedback_v3, set_use_reference
 from src.lm_config import (
     DEFAULT_GENERATION_API_BASE,
     DEFAULT_GENERATION_MODEL,
+    DEFAULT_MAX_TOKENS,
     DEFAULT_REFLECTION_API_BASE,
     DEFAULT_REFLECTION_MODEL,
     configure_qwen_pair,
@@ -473,7 +474,15 @@ def parse_args(argv=None):
         default=os.getenv("DSPY_REFLECTION_API_BASE", DEFAULT_REFLECTION_API_BASE),
     )
     parser.add_argument("--temperature", type=float, default=0.2)
-    parser.add_argument("--max-tokens", type=int, default=8192)
+    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    parser.add_argument(
+        "--no-thinking",
+        dest="enable_thinking",
+        action="store_const",
+        const=False,
+        default=None,
+        help="Send enable_thinking=false. Omit to let the chat template decide (thinking on).",
+    )
     parser.add_argument("--lm-timeout", type=int, default=1800)
     parser.add_argument("--skip-connection-check", action="store_true")
     return parser.parse_args(argv)
@@ -510,6 +519,11 @@ def main(argv=None):
     logger.info("  Run directory: %s", run_dir)
 
     env_generation, env_reflection = qwen_configs_from_env()
+    # Why not pass None: CLI で指定がないときに None を渡すと、環境変数で
+    # 設定された enable_thinking を上書きして消してしまう。
+    thinking_override = (
+        {} if args.enable_thinking is None else {"enable_thinking": args.enable_thinking}
+    )
     generation_lm, reflection_lm = configure_qwen_pair(
         generation=replace(
             env_generation,
@@ -517,6 +531,7 @@ def main(argv=None):
             api_base=args.generation_api_base,
             temperature=args.temperature,
             max_tokens=args.max_tokens,
+            **thinking_override,
             timeout=args.lm_timeout,
         ),
         reflection=replace(
@@ -525,6 +540,7 @@ def main(argv=None):
             api_base=args.reflection_api_base,
             temperature=args.temperature,
             max_tokens=args.max_tokens,
+            **thinking_override,
             timeout=args.lm_timeout,
         ),
     )

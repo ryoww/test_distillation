@@ -13,14 +13,28 @@ DEFAULT_GENERATION_API_BASE = "http://127.0.0.1:7501/v1"
 DEFAULT_REFLECTION_API_BASE = "http://127.0.0.1:7502/v1"
 
 
+# thinkingと最終出力の合計がこの枠に収まる必要がある。上限は max_model_len - 入力長。
+DEFAULT_MAX_TOKENS = 32768
+
+
+def _thinking_from_env(name: str) -> bool | None:
+    """未設定なら None を返し、chat template の既定に委ねる。"""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return None
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
 @dataclass(frozen=True)
 class LMConfig:
     model: str
     api_base: str
     api_key: str = "local"
     temperature: float = 0.2
-    max_tokens: int = 8192
+    max_tokens: int = DEFAULT_MAX_TOKENS
     timeout: int = 1800
+    enable_thinking: bool | None = None
+    """None なら chat template の既定に従う。Qwen3系の既定は thinking 有効。"""
 
 
 def _dspy_model_name(model: str) -> str:
@@ -29,6 +43,14 @@ def _dspy_model_name(model: str) -> str:
 
 def create_lm(config: LMConfig) -> dspy.LM:
     """Build one DSPy client without changing global DSPy settings."""
+    kwargs = {}
+    # Why only when set: 既定では chat_template_kwargs を送らない。Qwen3系の
+    # template は enable_thinking 未指定なら thinking を開くので、送らないことが
+    # 「モデルに好きなだけ考えさせる」既定になる。
+    if config.enable_thinking is not None:
+        kwargs["extra_body"] = {
+            "chat_template_kwargs": {"enable_thinking": config.enable_thinking}
+        }
     return dspy.LM(
         model=_dspy_model_name(config.model),
         api_base=config.api_base,
@@ -36,6 +58,7 @@ def create_lm(config: LMConfig) -> dspy.LM:
         temperature=config.temperature,
         max_tokens=config.max_tokens,
         timeout=config.timeout,
+        **kwargs,
     )
 
 
@@ -55,7 +78,7 @@ def configure_lm(lm_cfg: dict) -> bool:
             api_base=lm_cfg.get("api_base", DEFAULT_GENERATION_API_BASE),
             api_key=api_key,
             temperature=lm_cfg.get("temperature", 0.2),
-            max_tokens=lm_cfg.get("max_tokens", 8192),
+            max_tokens=lm_cfg.get("max_tokens", DEFAULT_MAX_TOKENS),
             timeout=lm_cfg.get("timeout", 1800),
         )
     )
@@ -70,7 +93,8 @@ def qwen_configs_from_env() -> tuple[LMConfig, LMConfig]:
         api_base=os.getenv("DSPY_GENERATION_API_BASE", DEFAULT_GENERATION_API_BASE),
         api_key=os.getenv("DSPY_GENERATION_API_KEY", "local"),
         temperature=float(os.getenv("DSPY_GENERATION_TEMPERATURE", "0.2")),
-        max_tokens=int(os.getenv("DSPY_GENERATION_MAX_TOKENS", "8192")),
+        max_tokens=int(os.getenv("DSPY_GENERATION_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
+        enable_thinking=_thinking_from_env("DSPY_GENERATION_ENABLE_THINKING"),
         timeout=int(os.getenv("DSPY_GENERATION_TIMEOUT", "1800")),
     )
     reflection = LMConfig(
@@ -78,7 +102,8 @@ def qwen_configs_from_env() -> tuple[LMConfig, LMConfig]:
         api_base=os.getenv("DSPY_REFLECTION_API_BASE", DEFAULT_REFLECTION_API_BASE),
         api_key=os.getenv("DSPY_REFLECTION_API_KEY", "local"),
         temperature=float(os.getenv("DSPY_REFLECTION_TEMPERATURE", "0.2")),
-        max_tokens=int(os.getenv("DSPY_REFLECTION_MAX_TOKENS", "8192")),
+        max_tokens=int(os.getenv("DSPY_REFLECTION_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
+        enable_thinking=_thinking_from_env("DSPY_REFLECTION_ENABLE_THINKING"),
         timeout=int(os.getenv("DSPY_REFLECTION_TIMEOUT", "1800")),
     )
     return generation, reflection
