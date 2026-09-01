@@ -309,6 +309,9 @@ uv run python scripts/rescore_with_checkers.py \
 
 生成段階で落ちた`gen_error`のレコードにはコードが無いため、そのまま引き継ぎます。
 
+2026-09-01 に20 core_type 分のチェッカーを追加して4条件を再採点した結果と、
+その過程で見つかった欠陥は `RESCORE_REPORT.md` にまとめてあります。
+
 ## 5. GEPA再学習
 
 参照あり:
