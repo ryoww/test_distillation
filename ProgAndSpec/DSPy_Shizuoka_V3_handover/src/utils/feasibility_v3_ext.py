@@ -227,6 +227,35 @@ def _index_map(value: Any) -> dict[int, Any] | None:
     return None
 
 
+def _count_map(value: Any) -> dict[int, float] | None:
+    """個数表を {index: count} へ正規化する。
+
+    ``{"2": 2}``、``[0, 0, 2]``、``[{"id": 2, "count": 2}]`` のいずれも受ける。
+    """
+    if isinstance(value, list) and value and all(isinstance(e, dict) for e in value):
+        out: dict[int, float] = {}
+        for entry in value:
+            index = next((_num(entry[k]) for k in ("id", "index", "item") if k in entry), None)
+            count = next(
+                (_num(entry[k]) for k in ("count", "quantity", "qty", "amount") if k in entry),
+                None,
+            )
+            if index is None or count is None:
+                return None
+            out[int(index)] = count
+        return out
+    mapped = _index_map(value)
+    if mapped is None:
+        return None
+    out = {}
+    for index, raw in mapped.items():
+        count = _num(raw)
+        if count is None:
+            return None
+        out[index] = count
+    return out
+
+
 def _edge_ends(edge: Any) -> tuple[Any, Any] | None:
     """辺を (from, to) へ正規化する。dict も 2要素リストも受ける。"""
     if isinstance(edge, dict):
@@ -506,13 +535,15 @@ def check_knapsack_packing_ip(instance: dict, solution: Any) -> dict:
     weights = _items_field(items, "weight")
 
     # 有界ナップサック: 個数が max_count 以内。
-    counts = _index_map(_pick(solution, "item_counts", "counts", "quantities"))
-    if counts is not None and any("max_count" in item for item in items):
+    raw_counts = _pick(solution, "item_counts", "counts", "quantities")
+    if raw_counts is not None and any("max_count" in item for item in items):
+        counts = _count_map(raw_counts)
+        if counts is None:
+            return _unverified("bounded knapsack counts are not readable")
         load = 0.0
-        for idx, raw in counts.items():
-            qty = _num(raw)
-            if qty is None or qty < 0:
-                violations.append(f"item {idx} count is not a non-negative number")
+        for idx, qty in counts.items():
+            if qty < 0:
+                violations.append(f"item {idx} count {qty:g} is negative")
                 continue
             if not 0 <= idx < len(items):
                 violations.append(f"item index {idx} out of range")
@@ -524,11 +555,7 @@ def check_knapsack_packing_ip(instance: dict, solution: Any) -> dict:
         if load > capacity + _ABS_TOL:
             violations.append(f"total weight {load:g} exceeds capacity {capacity:g}")
         values = _items_field(items, "value")
-        total = sum(
-            (_num(raw) or 0.0) * values[idx]
-            for idx, raw in counts.items()
-            if 0 <= idx < len(values)
-        )
+        total = sum(qty * values[idx] for idx, qty in counts.items() if 0 <= idx < len(values))
         claimed = _num(_pick(solution, "max_value", "total_value", "objective_value"))
         if claimed is not None and not _close(claimed, total):
             violations.append(f"max_value {claimed:g} != value of chosen counts {total:g}")
@@ -1927,7 +1954,7 @@ def check_composite_lp(instance: dict, solution: Any) -> dict:
                     violations.append(
                         f"retailer {retailer} short by {-inventory:g} at period {period}"
                     )
-                spend += (_num(instance.get("holding_retailer")) or 0.0) * inventory
+                spend += (_num(instance.get("holding_retailer")) or 0.0) * max(inventory, 0.0)
         warehouse_inventory = 0.0
         for period in range(periods):
             shipped_out = sum(
@@ -1938,7 +1965,9 @@ def check_composite_lp(instance: dict, solution: Any) -> dict:
             warehouse_inventory += (
                 production[period] if period < len(production) else 0.0
             ) - shipped_out
-            spend += (_num(instance.get("holding_warehouse")) or 0.0) * warehouse_inventory
+            spend += (_num(instance.get("holding_warehouse")) or 0.0) * max(
+                warehouse_inventory, 0.0
+            )
         claimed = _num(_pick(solution, "min_total_cost", "total_cost", "objective_value"))
         if claimed is not None and not _close_soft(claimed, spend):
             violations.append(f"min_total_cost {claimed:g} != cost of this plan {spend:g}")
@@ -2084,7 +2113,7 @@ def check_production_lp(instance: dict, solution: Any) -> dict:
             )
             spend += sum(rate * qty for rate, qty in zip(rates, quantities))
             inventory += sum(quantities) - (demand[period] if period < len(demand) else 0.0)
-            spend += holding * inventory
+            spend += holding * max(inventory, 0.0)
         claimed = _num(_pick(solution, "min_cost", "total_cost", "objective_value"))
         if claimed is not None and not _close_soft(claimed, spend):
             violations.append(f"min_cost {claimed:g} != cost of this plan {spend:g}")
@@ -2114,7 +2143,8 @@ def check_production_lp(instance: dict, solution: Any) -> dict:
         for period, produced in enumerate(production):
             spend += unit_cost * produced
             inventory += produced - (demand[period] if period < len(demand) else 0.0)
-            spend += holding * inventory
+            # 欠品は在庫費の割引にならないので、負の在庫には課さない。
+            spend += holding * max(inventory, 0.0)
         claimed = _num(_pick(solution, "min_cost", "total_cost", "objective_value"))
         if claimed is not None and not _close_soft(claimed, spend):
             violations.append(f"min_cost {claimed:g} != cost of this plan {spend:g}")
@@ -2225,7 +2255,7 @@ def check_lot_sizing_milp(instance: dict, solution: Any) -> dict:
             spend += setup
         spend += unit_cost * produced
         inventory += produced - (demand[period] if period < len(demand) else 0.0)
-        spend += holding * inventory
+        spend += holding * max(inventory, 0.0)
     claimed = _num(_pick(solution, "min_cost", "total_cost", "objective_value"))
     if claimed is not None and not _close_soft(claimed, spend):
         violations.append(f"min_cost {claimed:g} != cost of this plan {spend:g}")

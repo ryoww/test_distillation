@@ -324,3 +324,37 @@ def test_cash_flow_rejects_a_sentinel_cost_that_contradicts_the_holdings():
     )
     assert result["verified"] is True
     assert result["feasible"] is False
+
+
+def test_bounded_knapsack_accepts_id_count_records():
+    record = _problem(56)
+    reference = record["reference_solution"]
+    counts = [
+        {"id": index, "count": reference["item_counts"].get(str(index), 0)}
+        for index in range(len(record["instance"]["items"]))
+    ]
+    result = _check(record, {"max_value": reference["max_value"], "item_counts": counts})
+    assert result["verified"] is True
+    assert result["feasible"] is True, result["violations"]
+
+
+def test_qap_rejects_a_cost_below_its_own_placement():
+    """実測: 配置は妥当だが費用を半分近く過少申告した解。"""
+    record = _problem(71)
+    result = _check(record, {"min_cost": 252.0, "placement": [1, 3, 4, 2, 0]})
+    assert result["verified"] is True
+    assert result["feasible"] is False
+    assert any("flow x distance" in v for v in result["violations"])
+
+
+def test_production_plan_does_not_credit_holding_cost_for_a_shortfall():
+    """欠品を在庫費の割引として扱うと、費用が負まで下がってしまう。"""
+    record = _problem(86)
+    empty = [
+        {"period": period, "regular": 0, "overtime": 0, "subcontract": 0}
+        for period in range(record["instance"]["periods"])
+    ]
+    result = _check(record, {"min_cost": 278.0, "plan": empty})
+    assert result["feasible"] is False
+    assert result["cost"] is not None
+    assert result["cost"] >= 0
