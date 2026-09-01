@@ -35,6 +35,7 @@ from src.data_loader import (
     load_and_split_stratified,
     load_v3_data,
     prepare_examples,
+    split_train_val_stratified,
 )
 from src.gepa_feedback_v3 import gepa_feedback_v3, set_use_reference
 from src.lm_config import (
@@ -555,8 +556,7 @@ def main(argv=None):
 
     # Split train into train/val (larger val for stronger GEPA signal)
     n_val = max(3, len(train_raw) // 3)
-    val_raw = train_raw[-n_val:]
-    train_only_raw = train_raw[:-n_val]
+    train_only_raw, val_raw = split_train_val_stratified(train_raw, n_val, seed=42)
     logger.info(f"Train: {len(train_only_raw)}, Val: {n_val}, Test: {len(test_raw)}")
 
     # Print core_type distribution

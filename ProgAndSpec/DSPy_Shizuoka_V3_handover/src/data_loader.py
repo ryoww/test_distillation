@@ -203,6 +203,60 @@ def load_and_split_stratified(
     return train, test
 
 
+def split_train_val_stratified(
+    examples: list[dict],
+    n_val: int,
+    seed: int = 42,
+) -> tuple[list[dict], list[dict]]:
+    """train集合をcore_typeで層化してtrain/valへ分ける。
+
+    Why not slice the tail: load_and_split_stratified は可読性のため戻り値を
+    instance_id でソートするため、末尾から切るとcore_typeが偏る。実際に
+    40問を末尾13問で切った構成では、val側が3 domainだけになり、train側と
+    ほとんど重ならなかった。GEPAはtrainで反省しvalで候補を選ぶので、
+    この偏りは候補選択をゆがめる。
+
+    - core_typeでグループ化し、seed付きで決定的にシャッフル
+    - ラウンドロビンでvalを埋め、valにcore_type多様性を確保
+    - 戻り値はどちらもinstance_id順
+    """
+    import random
+
+    if n_val <= 0 or n_val >= len(examples):
+        return list(examples), []
+
+    groups: dict[str, list[dict]] = {}
+    for ex in examples:
+        groups.setdefault(ex["core_type"], []).append(ex)
+
+    rng = random.Random(seed)
+    ordered_types = sorted(groups)
+    pools: dict[str, list[dict]] = {}
+    for ct in ordered_types:
+        items = sorted(groups[ct], key=lambda e: e["instance_id"])
+        rng.shuffle(items)
+        pools[ct] = items
+
+    val: list[dict] = []
+    while len(val) < n_val:
+        progressed = False
+        for ct in ordered_types:
+            if len(val) >= n_val:
+                break
+            if pools[ct]:
+                val.append(pools[ct].pop())
+                progressed = True
+        if not progressed:
+            break
+
+    val_ids = {ex["instance_id"] for ex in val}
+    train_only: list[dict] = [ex for ex in examples if ex["instance_id"] not in val_ids]
+
+    train_only.sort(key=lambda e: e["instance_id"])
+    val.sort(key=lambda e: e["instance_id"])
+    return train_only, val
+
+
 def prepare_examples(examples: list[dict]) -> list:
     """V3例をDSPy Exampleに変換。
 
