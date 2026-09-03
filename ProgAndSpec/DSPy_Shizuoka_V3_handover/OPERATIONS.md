@@ -375,9 +375,52 @@ uv run python scripts/preflight.py --offline
 保存済み評価結果は、旧メトリックの最大化誤判定と参照フリーprompt漏洩を含む
 歴史的成果物です。新しい実験結果との直接比較には、修正版で再評価した結果を使います。
 
-## 7. 既知の限界
+## 7. 雛形からの問題生成（検証済みホールドアウトの追加）
+
+既存の100問は前部門の生成器で作られ、生成器は同梱されていません。参照解も最適とは
+限らず、`beat_reference` が起きます。`src/datagen/` は既存問題を雛形にして、
+同じ形状の instance を乱数で作り、厳密ソルバーで参照解を付けます。
+
+- 問題文と requirements は雛形の文章をそのまま使うため、文章に書かれている件数・容量・
+  予算は雛形の値を保ち、それ以外の数値だけを引き直します。
+- 参照解は既存の feasibility チェッカーを `verified` かつ違反ゼロで通ったものだけを
+  書き出します。通らなければ生成自体が失敗します。
+- 各ソルバーは雛形 instance で元の参照値を再現することをテストで固定しています。
+- 生成 instance は世界に存在しなかったものなので、モデルが答えを記憶している可能性が
+  ありません。GEPA の候補選択にも demo にも使っていない集合として扱えます。
+
+```bash
+uv run python scripts/generate_problems.py --list
+uv run python scripts/generate_problems.py --per-template 5 --seed 20260904
+```
+
+出力は `data/problems_generated/prob_1001.json` 以降と `manifest.json` です。
+既存の `data/problems/` と `data_manifest.json` は変更しません。乱数は
+`seed:雛形ID:通番` で決まり、CP-SAT は 1 worker 固定なので、同じ引数なら別プロセスでも
+同じファイルになります。出力先に前回の `prob_*.json` が残っている場合は止まるので、
+入れ替えるときは `--force` を付けます。
+
+2026-09-04 時点の雛形は12問（prob_001, 031, 033, 043, 055, 059, 067, 077, 081, 089,
+091, 097）で、9 domain を覆います。`--per-template 5` で60問を生成し、参照解をそのまま
+返す `solve()` を `metrics_v3` に通すと60問すべてが `exact_match` になります。
+
+生成した集合を保存済みプログラムで評価するには、全問をテスト側に置きます。
+
+```bash
+uv run python train_gepa_v3.py --eval-only --data-dir data/problems_generated \
+  --n-train 0 --n-test 60 --run-name phaseE-generated60
+```
+
+雛形を増やすときは `src/datagen/templates.py` に `(generate, solve)` の組を登録し、
+`tests/test_datagen.py` が雛形の参照値を再現できることと、生成問題がチェッカーを
+通ることを自動で確認します。prob_002（同一並列機械）は雛形の参照解 `machine_assignment`
+を旧チェッカーが読めないため、チェッカー修正まで雛形に含めていません。
+
+## 8. 既知の限界
 
 - 95問は数値目的を選択できますが、5問は数値目的がありません。
+- 旧チェッカー（feasibility.py 直登録の8 core_type）は prob_002・003・012・027 の
+  参照解を infeasible と判定します。参照解と同じ形で返した正答が減点されます。
 - feasibility checker未登録の問題は `unverified` とし、参照一致・参照超えに数えません。
 - `safe_exec` は既知のdunder/import迂回を拒否しますが、Python sandboxを安全境界とは
   みなしません。信頼できない生成コードは、権限を落としたコンテナ等で実行してください。

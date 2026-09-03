@@ -27,9 +27,11 @@
 | `src/utils/safe_exec.py` | AST制限付き別プロセス実行（multiprocessing spawn） |
 | `src/utils/feasibility.py` | 制約充足検査 |
 | `src/utils/scorer.py` | 目的値計算補助 |
+| `src/datagen/` | 既存問題を雛形にした instance 生成器と厳密ソルバー（`OPERATIONS.md` 7章） |
 
 ### 補助スクリプト（任意・あると便利）
 - `eval_gepa_v3.py`, `quick_eval_v3.py`, `train_eval_v3.py`
+- `scripts/generate_problems.py`（検証済み参照解つき問題の量産）
 
 ---
 
