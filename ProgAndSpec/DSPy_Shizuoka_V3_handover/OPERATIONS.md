@@ -437,7 +437,32 @@ uv run python train_gepa_v3.py --eval-only --data-dir data/problems_generated \
 `tests/test_datagen.py` が雛形の参照値を再現できることと、生成問題がチェッカーを
 通ることを自動で確認します。
 
-## 8. 既知の限界
+## 8. Slurm での生成ホールドアウト評価
+
+このサーバーは Slurm（partition `p1`、GPU 2 枚）で GPU を管理します。生成集合の評価は
+`scripts/slurm_eval_generated.sbatch` を handover ディレクトリから投入します。1 ジョブで
+GPU 2 枚を確保し、GPU0 に Qwen3.6、GPU1 に Qwen3.8 を立て、両サーバーの `/v1/models` が
+応答してから改善前後 × 2 モデルの 4 条件を 2 shard ずつ同時に流します。ジョブ終了時に
+サーバーも止まります。
+
+```bash
+cd ProgAndSpec/DSPy_Shizuoka_V3_handover
+export QWEN_HF_HOME=/home/yy-lab/test_DSPy/model/hf_home
+export QWEN_VLLM_ENV=/home/yy-lab/test_DSPy/.runtime/vllm/vllm-cu13
+sbatch scripts/slurm_eval_generated.sbatch
+squeue -u "$USER"
+```
+
+ログは `outputs/slurm/<job名>-<jobid>.out` と `outputs/slurm/<run名>/`（vLLM 2 台分、preflight、
+compare）に、結果は `outputs/prompt_model_comparisons/<run名>/factorial_comparison.json` に
+出ます。`RUN_NAME`、`DATA_DIR`、`SHARDS` は環境変数で上書きできます。
+
+生成集合では `compare_prompt_models.py --data-dir` が manifest.json を見て、分割を
+`all`（全問）と `domain_<分野>` に切り替えます。`primary_subset` は `all` です。
+100 問の実測では Qwen3.6 が 1 条件あたり約 1 時間、Qwen3.8 が約 1.7 時間だったので、
+140 問 × 2 モデル同時実行は 3 時間前後を見込み、`--time` は 8 時間にしています。
+
+## 9. 既知の限界
 
 - 95問は数値目的を選択できますが、5問は数値目的がありません。
 - 旧チェッカー（feasibility.py 直登録の8 core_type）は `jobs` や `customers` キーのない

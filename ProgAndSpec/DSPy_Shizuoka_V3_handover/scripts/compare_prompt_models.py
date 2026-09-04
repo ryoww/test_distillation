@@ -29,7 +29,6 @@ MODEL_MANIFEST_PATH = BASE_DIR / "model_manifest.json"
 DATA_MANIFEST_PATH = BASE_DIR / "data_manifest.json"
 IMPROVED_PROGRAM_PATH = BASE_DIR / "compiled_program_v3_gepa_phaseE.json"
 DATA_DIR = BASE_DIR / "data" / "problems"
-SUBSET_ORDER = ("untouched40", "legacy_test20", "all100", "train40")
 MODEL_LABELS = ("qwen3_6_27b", "qwen3_8_27b")
 EXPECTED_CONDITION_KEYS = (
     ("before", "qwen3_6_27b"),
@@ -120,6 +119,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--qwen38-revision", default=defaults[1].revision)
     parser.add_argument("--improved-program-path", type=Path, default=IMPROVED_PROGRAM_PATH)
     parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=DATA_DIR,
+        help="Problem directory: the shipped 100 (default) or a datagen output with manifest.json.",
+    )
+    parser.add_argument(
         "--output-dir", type=Path, default=BASE_DIR / "outputs" / "prompt_model_comparisons"
     )
     parser.add_argument("--run-name")
@@ -168,8 +173,35 @@ def create_baseline_program(path: Path) -> Path:
     return path
 
 
+def _generated_manifest(data_dir: Path) -> dict[str, Any] | None:
+    """Return the datagen manifest when data_dir holds generated problems, else None."""
+
+    manifest_path = data_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    with manifest_path.open(encoding="utf-8") as file:
+        manifest = json.load(file)
+    return manifest if "generator_version" in manifest else None
+
+
 def split_instance_ids(data_dir: Path = DATA_DIR) -> dict[str, list[str]]:
-    """Reproduce the historical 40/20 split and identify the never-selected 40 problems."""
+    """Name the problem subsets whose means the comparison reports.
+
+    Shipped 100-problem corpus: reproduce the historical 40/20 split and identify the
+    never-selected 40 problems. Generated holdout (datagen manifest present): every
+    problem is untouched by GEPA, so the subsets are the whole set plus one per domain.
+    """
+
+    if _generated_manifest(data_dir) is not None:
+        records = load_v3_data(str(data_dir))
+        all_ids = sorted(f"prob_{int(row['id']):03d}" for row in records)
+        by_domain: dict[str, list[str]] = {}
+        for row in records:
+            by_domain.setdefault(str(row["domain"]), []).append(f"prob_{int(row['id']):03d}")
+        subsets = {"all": all_ids}
+        for domain in sorted(by_domain):
+            subsets[f"domain_{domain}"] = sorted(by_domain[domain])
+        return subsets
 
     train, legacy_test = load_and_split_stratified(
         str(data_dir), n_train=40, n_test=20, seed=42, use_reference=True
@@ -185,6 +217,18 @@ def split_instance_ids(data_dir: Path = DATA_DIR) -> dict[str, list[str]]:
         "untouched40": untouched_ids,
         "all100": all_ids,
     }
+
+
+def whole_set_key(subsets: dict[str, list[str]]) -> str:
+    """The subset that covers every problem: all100 for the shipped corpus, all otherwise."""
+
+    return "all100" if "all100" in subsets else "all"
+
+
+def primary_subset_key(subsets: dict[str, list[str]]) -> str:
+    """The subset headline effects are read from."""
+
+    return "untouched40" if "untouched40" in subsets else whole_set_key(subsets)
 
 
 def aggregate_results(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
@@ -321,7 +365,8 @@ def merge_comparison_runs(
         raise ValueError(f"2x2 condition set mismatch: missing={missing}, extra={extra}")
 
     conditions = [condition_by_key[key] for key in EXPECTED_CONDITION_KEYS]
-    effects = {subset: compute_effects(conditions, subset) for subset in SUBSET_ORDER}
+    subset_names = list(reference_benchmark["subset_instance_ids"])
+    effects = {subset: compute_effects(conditions, subset) for subset in subset_names}
     benchmark = {
         field: reference_benchmark[field]
         for field in MERGE_COMPATIBILITY_FIELDS
@@ -379,12 +424,13 @@ def _evaluation_jobs(
     shard_count: int,
     *,
     materialize: bool,
+    source_dir: Path = DATA_DIR,
 ) -> tuple[EvaluationJob, ...]:
     shards = [tuple(all_ids[index::shard_count]) for index in range(shard_count)]
     shard_dirs: list[Path] = []
     for index, instance_ids in enumerate(shards, start=1):
         if shard_count == 1:
-            shard_dirs.append(DATA_DIR)
+            shard_dirs.append(source_dir)
             continue
         data_dir = run_root / "shards" / f"shard_{index:02d}_of_{shard_count:02d}"
         shard_dirs.append(data_dir)
@@ -392,7 +438,7 @@ def _evaluation_jobs(
             data_dir.mkdir(parents=True, exist_ok=False)
             for instance_id in instance_ids:
                 (data_dir / f"{instance_id}.json").symlink_to(
-                    (DATA_DIR / f"{instance_id}.json").resolve()
+                    (source_dir / f"{instance_id}.json").resolve()
                 )
 
     jobs = []
@@ -504,11 +550,11 @@ def _condition_summary(
     rows_by_id = {str(row["instance_id"]): row for row in rows}
     if len(rows_by_id) != len(rows):
         raise ValueError("duplicate instance IDs in child result")
-    expected_ids = set(subsets["all100"])
+    expected_ids = set(subsets[whole_set_key(subsets)])
     if set(rows_by_id) != expected_ids:
         missing = sorted(expected_ids - set(rows_by_id))
         extra = sorted(set(rows_by_id) - expected_ids)
-        raise ValueError(f"100-problem set mismatch: missing={missing}, extra={extra}")
+        raise ValueError(f"problem set mismatch: missing={missing}, extra={extra}")
     aggregates = {
         name: aggregate_results([rows_by_id[instance_id] for instance_id in ids])
         for name, ids in subsets.items()
@@ -530,13 +576,16 @@ def _condition_summary(
 
 def _print_summary(summaries: Sequence[dict[str, Any]]) -> None:
     print("\nPrompt/model comparison")
-    print(f"{'Condition':<31}{'Untouched40':>14}{'Legacy20':>12}{'All100':>12}")
+    columns = [
+        name
+        for name in ("untouched40", "legacy_test20", "all100", "all")
+        if name in summaries[0]["subsets"]
+    ]
+    print(f"{'Condition':<31}" + "".join(f"{name:>14}" for name in columns))
     for row in summaries:
         print(
             f"{row['label']:<31}"
-            f"{row['subsets']['untouched40']['mean_score']:>14.3f}"
-            f"{row['subsets']['legacy_test20']['mean_score']:>12.3f}"
-            f"{row['subsets']['all100']['mean_score']:>12.3f}"
+            + "".join(f"{row['subsets'][name]['mean_score']:>14.3f}" for name in columns)
         )
 
 
@@ -567,11 +616,18 @@ def main(
         conditions = tuple(
             condition for condition in conditions if condition.model_target.label == args.only_model
         )
-    subsets = split_instance_ids(DATA_DIR)
+    data_dir = args.data_dir.expanduser().resolve()
+    subsets = split_instance_ids(data_dir)
+    all_key = whole_set_key(subsets)
 
     if args.dry_run:
         jobs = _evaluation_jobs(
-            conditions, subsets["all100"], run_root, args.shards, materialize=False
+            conditions,
+            subsets[all_key],
+            run_root,
+            args.shards,
+            materialize=False,
+            source_dir=data_dir,
         )
         for job in jobs:
             print(f"[{job.label}] {shlex.join(_build_command(job, args, run_root))}")
@@ -584,7 +640,12 @@ def main(
         run_root.mkdir(parents=True, exist_ok=False)
         create_baseline_program(baseline_path)
         jobs = _evaluation_jobs(
-            conditions, subsets["all100"], run_root, args.shards, materialize=True
+            conditions,
+            subsets[all_key],
+            run_root,
+            args.shards,
+            materialize=True,
+            source_dir=data_dir,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"Cannot initialize comparison output {run_root}: {exc}", file=sys.stderr)
@@ -654,19 +715,22 @@ def main(
     observed_keys = {_condition_key(summary) for summary in summaries}
     comparable = run_complete and observed_keys == set(EXPECTED_CONDITION_KEYS)
     effects = (
-        {subset: compute_effects(summaries, subset) for subset in SUBSET_ORDER}
-        if comparable
-        else {}
+        {subset: compute_effects(summaries, subset) for subset in subsets} if comparable else {}
     )
-    with DATA_MANIFEST_PATH.open(encoding="utf-8") as file:
-        data_manifest_sha256 = json.load(file).get("sha256")
+    generated = _generated_manifest(data_dir)
+    if generated is not None:
+        data_manifest_sha256 = generated.get("sha256")
+    else:
+        with DATA_MANIFEST_PATH.open(encoding="utf-8") as file:
+            data_manifest_sha256 = json.load(file).get("sha256")
     with MODEL_MANIFEST_PATH.open(encoding="utf-8") as file:
         serving = json.load(file).get("serving", {})
     comparison = {
         "benchmark": {
             "run_name": run_name,
             "design": "2x2 prompt_by_model_factorial",
-            "primary_subset": "untouched40",
+            "primary_subset": primary_subset_key(subsets),
+            "data_dir": str(data_dir),
             "seed": 42,
             "temperature": args.temperature,
             "max_tokens": args.max_tokens,

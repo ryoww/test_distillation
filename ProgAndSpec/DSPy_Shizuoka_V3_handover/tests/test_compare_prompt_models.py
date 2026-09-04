@@ -742,3 +742,44 @@ def test_only_model_partial_runs_merge_to_complete_factorial_comparison(tmp_path
         0.4
     )
     assert merged["effects"]["all100"]["model_effect_by_prompt"]["before"] == pytest.approx(0.2)
+
+
+def test_split_instance_ids_uses_whole_set_and_domains_for_generated_problems(tmp_path):
+    """What: a datagen directory is one untouched holdout, reported whole and per domain."""
+    for index, domain in ((1001, "ナップサック"), (1002, "ナップサック"), (1003, "配送")):
+        (tmp_path / f"prob_{index}.json").write_text(
+            json.dumps(
+                {
+                    "id": index,
+                    "name": "x",
+                    "domain": domain,
+                    "math_type": "整数計画",
+                    "difficulty": "簡単",
+                    "split": "test",
+                    "description": "d",
+                    "requirements": {"objective": "o", "constraints": []},
+                    "instance": {"a": 1},
+                    "reference_solution": {"max_value": 1},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"generator_version": 1, "sha256": "abc"}), encoding="utf-8"
+    )
+
+    splits = compare.split_instance_ids(tmp_path)
+
+    assert splits["all"] == ["prob_1001", "prob_1002", "prob_1003"]
+    assert splits["domain_ナップサック"] == ["prob_1001", "prob_1002"]
+    assert splits["domain_配送"] == ["prob_1003"]
+    assert compare.whole_set_key(splits) == "all"
+    assert compare.primary_subset_key(splits) == "all"
+
+
+def test_shipped_corpus_keeps_untouched40_as_primary_subset():
+    """What: the shipped 100 problems still report untouched40 as the headline subset."""
+    splits = compare.split_instance_ids(DATA_DIR)
+    assert compare.whole_set_key(splits) == "all100"
+    assert compare.primary_subset_key(splits) == "untouched40"
