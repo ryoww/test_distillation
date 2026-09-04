@@ -280,3 +280,39 @@ uv run python scripts/diagnose_effects.py \
 | `tests/test_train_val_split.py` | 層化分割の回帰テスト |
 | `tests/test_diagnose_effects.py` | 効果分解のテスト |
 | `OPERATIONS.md` 4章 | 再採点の運用手順 |
+
+---
+
+## 10. 追補（2026-09-04）: 旧チェッカーが参照解を弾いていた4問
+
+feasibility.py に直接登録された旧チェッカー（8 core_type）は、prob_002・003・012・027 の
+同梱参照解そのものを infeasible と判定していました。`schedule` / `assignments` / `assignment`
+以外のキー（`machine_assignment`、`optimal_sequence`、`node_assignment`）と、`routes` 以外の
+経路キー（`day1_routes`、`initial_routes`）を読めなかったためです。参照解と同じ形で返した
+正答が 0 点になる構造でした。
+
+キー候補を広げ、makespan が無い解では他の数値目的を objective として受けるようにしました。
+100問すべての参照解が自分のチェッカーを通ることは `tests/test_legacy_checkers.py` で固定しています。
+
+同じ保存済みコードを再採点した結果（`rescored-legacy-checkers-20260904.json`）:
+
+| 条件 | 問題 | 修正前 | 修正後 |
+|---|---|---|---|
+| after · Qwen3.6 | prob_002 / 003 | infeasible 0.00 | exact_match 1.50 |
+| after · Qwen3.6 | prob_012 / 027 | infeasible 0.00 | partial_feasible 0.28 / 0.16 |
+| after · Qwen3.8 | prob_002 | infeasible 0.00 | exact_match 1.50 |
+| before · Qwen3.6 | prob_003 | infeasible 0.00 | exact_match 1.50 |
+| その他 | exec_error / gen_error の記録 | 変化なし | 変化なし |
+
+分割平均への影響は最大でも +0.045（untouched40、Qwen3.6 の before / after とも）で、
+before と after に同じ幅で乗るため、プロンプト効果の推定はほぼ動きません。
+
+| 条件 | untouched40 | train40 | all100 |
+|---|---|---|---|
+| before · Qwen3.6 | 0.960 → 1.004 | 0.820 → 0.826 | 0.887 → 0.907 |
+| after · Qwen3.6 | 0.907 → 0.951 | 1.180 → 1.221 | 1.064 → 1.098 |
+| before · Qwen3.8 | 0.563 → 0.570 | 0.455 → 0.459 | 0.514 → 0.518 |
+| after · Qwen3.8 | 0.576 → 0.583 | 0.797 → 0.835 | 0.653 → 0.671 |
+
+partial_feasible に留まる prob_012 / 027 は、チェッカーが構造しか見ないためモデル解の
+目的値が検証されず、旧メトリックの部分点になっています。

@@ -435,7 +435,21 @@ def check_scheduling_jobshop_detailed(instance: dict, solution: any) -> dict:
             "cost": None,
         }
 
-    schedule = solution.get("schedule", solution.get("assignments", solution.get("assignment")))
+    # 参照解が使う割当の形はキー名がまちまちなので、読める候補を順に探す。
+    schedule = None
+    for key in (
+        "schedule",
+        "assignments",
+        "assignment",
+        "machine_assignment",
+        "node_assignment",
+        "optimal_sequence",
+        "sequence",
+        "order",
+    ):
+        if solution.get(key):
+            schedule = solution[key]
+            break
     if not schedule:
         violations.append("empty or missing schedule/assignments field")
         return {
@@ -465,10 +479,20 @@ def check_scheduling_jobshop_detailed(instance: dict, solution: any) -> dict:
             "cost": None,
         }
 
-    # Check makespan is present (main objective)
+    # Check that an objective is present. makespan is the usual one, but this checker
+    # also serves problems whose objective is a priority sum or an assignment count.
     makespan = solution.get("makespan", solution.get("total_time"))
     if makespan is None:
-        violations.append("no makespan field in solution")
+        numeric = [
+            v
+            for k, v in solution.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and k != "note"
+        ]
+        if not numeric:
+            violations.append("no makespan or other numeric objective field in solution")
+        else:
+            # Why not require makespan: prob_012 の参照解は total_priority だけを持つ。
+            makespan = numeric[0]
     elif makespan == 0:
         violations.append("makespan=0 (suspiciously low)")
 
@@ -573,7 +597,9 @@ def check_vrp_v3_detailed(instance: dict, solution: any) -> dict:
             "cost": None,
         }
 
-    routes = solution.get("routes")
+    # Why not routes only: 配送＋在庫連立（day1_routes）と動的VRP（initial_routes）の
+    # 参照解は初日・初期のルートだけを返す。
+    routes = solution.get("routes") or solution.get("day1_routes") or solution.get("initial_routes")
     if not routes:
         violations.append("empty or missing routes field")
         return {
