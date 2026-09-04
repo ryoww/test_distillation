@@ -218,3 +218,29 @@ def test_safe_run_rejects_numpy_ctypes_escape():
 
     assert ok is False
     assert result.startswith("Banned attribute")
+
+
+def test_safe_run_supports_from_import_of_allowed_submodules():
+    """What: `from scipy.optimize import linprog` and ortools' cp_model import work in the sandbox."""
+    code = (
+        "from scipy.optimize import linprog\n"
+        "from ortools.sat.python import cp_model\n"
+        "def solve(instance):\n"
+        "    return {'ok': linprog is not None and cp_model.CpModel is not None}\n"
+    )
+    ok, result = safe_run(code, {}, timeout=30)
+    assert ok, result
+    assert result == {"ok": True}
+
+
+def test_safe_run_returns_plain_python_types_for_numpy_results():
+    """What: numpy scalars and arrays in solve() output come back as plain floats and lists."""
+    code = (
+        "import numpy as np\n"
+        "def solve(instance):\n"
+        "    return {'cost': np.float64(1.5), 'x': np.array([1, 2]), 'n': np.int64(3)}\n"
+    )
+    ok, result = safe_run(code, {}, timeout=30)
+    assert ok, result
+    assert result == {"cost": 1.5, "x": [1, 2], "n": 3}
+    assert type(result["cost"]) is float and type(result["n"]) is int

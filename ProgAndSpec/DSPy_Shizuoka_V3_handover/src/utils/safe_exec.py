@@ -114,6 +114,35 @@ def _validate_ast(code: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _to_plain(value: Any) -> Any:
+    """numpy 等の外部型を JSON 互換の Python 型へ再帰的に変換する。
+
+    numpy.float64 は float のサブクラスなので、素の型かどうかを見る前に
+    tolist / item を持つかで外部型を判定する。
+    """
+    if isinstance(value, dict):
+        return {
+            k if isinstance(k, (str, int, float, bool)) else str(k): _to_plain(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_to_plain(v) for v in value]
+    if value is None or type(value) in (str, int, float, bool):
+        return value
+    if hasattr(value, "tolist"):
+        return _to_plain(value.tolist())
+    if hasattr(value, "item"):
+        try:
+            return _to_plain(value.item())
+        except (TypeError, ValueError):
+            pass
+    # bool は int のサブクラスなので先に見る。
+    for base in (bool, int, float, str):
+        if isinstance(value, base):
+            return base(value)
+    return repr(value)
+
+
 def _worker(code: str, instance: dict, q):
     try:
         ok, msg = _validate_ast(code)
@@ -125,24 +154,11 @@ def _worker(code: str, instance: dict, q):
             top = name.split(".")[0]
             if top not in ALLOWED_IMPORTS:
                 raise ImportError(f"Import of {name} is not allowed")
-            # If pre-imported, use cached module and resolve submodule
-            if top in _preimported and fromlist:
-                base_mod = _preimported[top]
-                result = {}
-                for attr in fromlist:
-                    try:
-                        # Try to get from the pre-imported module
-                        obj = getattr(base_mod, attr, None)
-                        if obj is None:
-                            # Try importing the submodule path
-                            submod_name = f"{name}.{attr}" if not "." in name else f"{name}.{attr}"
-                            obj = __import__(submod_name, globals_dict, locals_dict, [attr], level)
-                        result[attr] = obj
-                    except (AttributeError, ImportError):
-                        pass
-                # Return the base module (standard __import__ behavior with fromlist)
-                return base_mod
-            if top in _preimported and not fromlist:
+            # Why not 先読みしたトップモジュールを返す: `from scipy.optimize import linprog` は
+            # fromlist 付きの __import__ が末端モジュール scipy.optimize を返す前提で動く。
+            # トップの scipy を返すと Python が getattr(scipy, "linprog") を試して失敗し、
+            # 許可ライブラリの正当な利用が IMPORT エラーになる。
+            if top in _preimported and not fromlist and "." not in name:
                 return _preimported[top]
             try:
                 return __import__(name, globals_dict, locals_dict, fromlist, level)
@@ -272,7 +288,10 @@ def _worker(code: str, instance: dict, q):
         # If solve() returns None but printed output, use printed output
         if result is None and _printed_output:
             result = "\n".join(_printed_output)
-        q.put(("ok", result))
+        # Why not そのまま送る: numpy のスカラーや配列を含む結果を親が unpickle すると、
+        # 親側で numpy の import が走り、dspy の遅延 import 経路で失敗することがある。
+        # 素の Python 型に直してから渡せば、親は numpy に触れない。
+        q.put(("ok", _to_plain(result)))
     except Exception:
         q.put(("error", traceback.format_exc()))
 
