@@ -56,8 +56,10 @@ def resolve_templates(spec: str) -> list[int]:
     return ids
 
 
-def clear_stale_outputs(output_dir: Path, force: bool) -> None:
+def clear_stale_outputs(output_dir: Path, force: bool, problem_dir: Path) -> None:
     """前回の生成物が混ざると load_v3_data が拾うので、残っていれば止める。"""
+    if output_dir.resolve() == problem_dir.resolve():
+        raise SystemExit(f"refusing to write into the shipped problem directory {problem_dir}")
     stale = sorted(output_dir.glob("prob_*.json"))
     if not stale:
         return
@@ -71,7 +73,7 @@ def clear_stale_outputs(output_dir: Path, force: bool) -> None:
 
 def write_dataset(records: list[dict], output_dir: Path, args: argparse.Namespace) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    clear_stale_outputs(output_dir, args.force)
+    clear_stale_outputs(output_dir, args.force, args.problem_dir)
     digests = []
     for record in records:
         path = output_dir / f"prob_{record['id']:04d}.json"

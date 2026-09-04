@@ -72,16 +72,21 @@ def production_distribution():
         )
         if not result.success:
             raise RuntimeError(f"LP failed: {result.message}")
+        # Why not 小数2桁に丸める: 丸めた出荷量は需要や容量を 0.01 だけ外しうる。
+        # 保存する解は LP の値のまま、費用もその解から計算する。
         shipments: dict[str, dict[str, float]] = {}
+        total_cost = 0.0
         for p in plants:
             row = {}
             for c in customers:
-                quantity = round(float(result.x[p * len(customers) + c]), 2)
-                if quantity > 0:
+                index = p * len(customers) + c
+                quantity = float(result.x[index])
+                if quantity > 1e-9:
                     row[str(c)] = quantity
+                    total_cost += cost[index] * quantity
             shipments[str(p)] = row
         return {
-            "min_total_cost": round(float(result.fun), 2),
+            "min_total_cost": total_cost,
             "shipments": shipments,
             "note": "LP（HiGHS、厳密最適解）",
         }

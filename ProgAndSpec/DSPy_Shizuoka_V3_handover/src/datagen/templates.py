@@ -240,7 +240,7 @@ def bin_packing():
         for b in range(n):
             model.Add(sum(sizes[i] * x[i, b] for i in range(n)) <= capacity * used[b])
             if b + 1 < n:
-                # Why: 箱は互換なので、番号順に使うことにして対称解を切る。
+                # Why not 任意の箱番号: 箱は互換なので、番号順に使うことにして対称解を切る。
                 model.AddImplication(used[b + 1], used[b])
         model.Minimize(sum(used))
         require_optimal(cp_model, solver.Solve(model))
@@ -369,9 +369,12 @@ def product_mix():
         )
         if not result.success:
             raise RuntimeError(f"LP failed: {result.message}")
+        # Why not 小数2桁に丸める: 丸めた生産量は資源上限を 0.01 だけ超えうる。
+        # 保存する解は LP の値のまま、利益もその解から計算する。
+        production = [float(v) for v in result.x]
         return {
-            "max_profit": round(-result.fun, 2),
-            "production": {str(i): round(float(v), 2) for i, v in enumerate(result.x)},
+            "max_profit": sum(p * q for p, q in zip(instance["profit"], production, strict=True)),
+            "production": {str(i): q for i, q in enumerate(production)},
             "note": "LP（HiGHS、厳密最適解）",
         }
 

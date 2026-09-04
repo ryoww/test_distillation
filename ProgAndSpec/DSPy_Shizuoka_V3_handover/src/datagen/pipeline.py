@@ -20,8 +20,8 @@ class ValidationError(ValueError):
 def shape_signature(value: Any, depth: int = 0) -> Any:
     """型・キー集合と、浅い階層の件数だけを残した形状。値は捨てる。
 
-    件数を見るのは深さ 1 まで。問題文が言及する件数はトップレベルの配列で、
-    入れ子の配列（被覆集合の要素数など）は instance ごとに変わってよい。
+    件数を見るのは深さ 2 まで（トップレベル dict の値と、その直下の行列の行）。
+    さらに深い配列（被覆集合の要素数や先行タスク一覧など）は instance ごとに変わってよい。
     """
     if isinstance(value, dict):
         # Why not キーを比較: 数値キーの辞書はキー自体が乱数で変わるので件数だけを見る。
@@ -32,8 +32,10 @@ def shape_signature(value: Any, depth: int = 0) -> Any:
             tuple(sorted((str(k), shape_signature(v, depth + 1)) for k, v in value.items())),
         )
     if isinstance(value, list):
-        size = len(value) if depth < 2 else None
-        return ("list", size, shape_signature(value[0], depth + 1) if value else None)
+        size = len(value) if depth < 3 else None
+        # 先頭要素だけでは行列の後続行の長さ違いを見逃すので、全要素の形を集める。
+        elements = tuple(sorted({repr(shape_signature(v, depth + 1)) for v in value}))
+        return ("list", size, elements)
     if isinstance(value, bool):
         return "bool"
     if isinstance(value, (int, float)):

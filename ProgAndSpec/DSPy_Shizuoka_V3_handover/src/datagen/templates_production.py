@@ -156,80 +156,76 @@ def workforce_planning():
 # 金融・投資
 # ============================================================
 
-# Why 100: 額面は instance に無い。雛形の参照解（債券2を 116/6 単位）は額面が 14 以上なら
-# 再現できるので値は特定できず、市場慣行の 100 を採る。
-BOND_FACE_VALUE = 100
 
-
-@register(82, "min_cost")
-def cash_flow_matching():
-    """prob_082: キャッシュフローマッチング。年数と債券数は問題文にあるので雛形の値を保つ。"""
+@register(83, "min_MAD")
+def mad_portfolio():
+    """prob_083: MAD ポートフォリオ。銘柄数・シナリオ数・目標収益率は問題文にあるので保つ。"""
 
     def generate(rng: random.Random, base: dict) -> dict:
-        periods = base["periods"]
-        num_bonds = len(base["bonds"])
+        n = base["num_assets"]
+        s = len(base["scenarios"])
+        target = base["target_return"]
 
         def make() -> dict:
-            maturities = rng.sample(range(1, periods + 1), num_bonds)
-            bonds = [
-                {
-                    "id": i,
-                    "price": rng.randint(90, 105),
-                    "coupon": rng.randint(3, 8),
-                    "maturity": maturities[i],
-                }
-                for i in range(num_bonds)
-            ]
+            scenarios = [[round(rng.uniform(-0.1, 0.18), 3) for _ in range(n)] for _ in range(s)]
+            # チェッカーは instance の mean_return を使うので、生成側も丸めた値を正とする。
+            mean_return = [round(sum(row[i] for row in scenarios) / s, 4) for i in range(n)]
             return {
-                "periods": periods,
-                "liabilities": int_list(rng, periods, 60, 150),
-                "bonds": bonds,
+                "num_assets": n,
+                "scenarios": scenarios,
+                "mean_return": mean_return,
+                "target_return": target,
             }
 
-        def ok(instance: dict) -> bool:
-            # 1銘柄だけで賄える instance は選択の余地が無いので、2銘柄以上使う解を求める。
-            holdings = solve(instance)["bond_holdings"]
-            return sum(1 for q in holdings.values() if q > 0) >= 2
+        def ok(inst: dict) -> bool:
+            means = inst["mean_return"]
+            # 目標を満たす配分が存在し、かつ全銘柄が目標超えで制約が無意味にならない instance に限る。
+            return max(means) > target and min(means) < target
 
         return retry(rng, make, ok)
 
     def solve(instance: dict) -> dict:
         from scipy.optimize import linprog
 
-        periods = instance["periods"]
-        bonds = instance["bonds"]
-        liabilities = instance["liabilities"]
-        num_bonds = len(bonds)
-
-        def cash_flow(bond: dict, year: int) -> float:
-            """year 年目（1 始まり）に 1 単位が払うクーポンと償還金。"""
-            if year > bond["maturity"]:
-                return 0.0
-            return bond["coupon"] + (BOND_FACE_VALUE if year == bond["maturity"] else 0)
-
-        # 変数は [保有量 x_b] + [各年末の繰越 s_t]。年 t の収支:
-        #   sum_b cf(b, t) x_b + s_{t-1} - s_t = L_t  （s_0 = 0）
-        a_eq = []
-        for t in range(periods):
-            row = [cash_flow(b, t + 1) for b in bonds] + [0.0] * periods
-            row[num_bonds + t] = -1.0
-            if t > 0:
-                row[num_bonds + t - 1] = 1.0
-            a_eq.append(row)
+        scenarios = instance["scenarios"]
+        means = instance["mean_return"]
+        n, s = instance["num_assets"], len(scenarios)
+        # 変数は [重み w_0..w_{n-1}] + [各シナリオの偏差の絶対値 d_0..d_{s-1}]。
+        a_ub, b_ub = [], []
+        for row in scenarios:
+            dev = [row[i] - means[i] for i in range(n)]
+            for sign in (1.0, -1.0):
+                coeff = [sign * v for v in dev] + [0.0] * s
+                a_ub.append(coeff)
+                b_ub.append(0.0)
+        for k in range(s):
+            a_ub[2 * k][n + k] = -1.0
+            a_ub[2 * k + 1][n + k] = -1.0
+        a_ub.append([-m for m in means] + [0.0] * s)
+        b_ub.append(-instance["target_return"])
         result = linprog(
-            c=[b["price"] for b in bonds] + [0.0] * periods,
-            A_eq=a_eq,
-            b_eq=liabilities,
-            bounds=[(0, None)] * (num_bonds + periods),
+            c=[0.0] * n + [1.0 / s] * s,
+            A_ub=a_ub,
+            b_ub=b_ub,
+            A_eq=[[1.0] * n + [0.0] * s],
+            b_eq=[1.0],
+            bounds=[(0, None)] * (n + s),
             method="highs",
         )
         if not result.success:
             raise RuntimeError(f"LP failed: {result.message}")
-        holdings = {str(b["id"]): round(float(result.x[i]), 3) for i, b in enumerate(bonds)}
+        weights = [float(v) for v in result.x[:n]]
+        # チェッカーと同じ式で MAD を再計算し、保存する重みと矛盾しない目的値にする。
+        mad = (
+            sum(
+                abs(sum(w * (row[i] - means[i]) for i, w in enumerate(weights)))
+                for row in scenarios
+            )
+            / s
+        )
         return {
-            "min_cost": round(float(result.fun), 2),
-            "feasible": True,
-            "bond_holdings": holdings,
+            "min_MAD": mad,
+            "weights": {str(i): w for i, w in enumerate(weights)},
             "note": "LP（HiGHS、厳密最適解）",
         }
 

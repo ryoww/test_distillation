@@ -122,3 +122,31 @@ def test_validation_rejects_shape_drift():
     record["instance"]["items"].append({"id": 99, "weight": 1, "value": 1})
     with pytest.raises(ValidationError):
         validate_problem(record, base, template)
+
+
+def test_shape_signature_catches_ragged_matrix_rows():
+    square = {"cost": [[1, 2], [3, 4]]}
+    ragged = {"cost": [[1, 2], [3]]}
+    assert shape_signature(square) != shape_signature(ragged)
+
+
+def test_generate_script_refuses_to_write_into_the_shipped_problem_dir():
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(BASE_DIR / "scripts" / "generate_problems.py"),
+            "--output-dir",
+            str(PROBLEM_DIR),
+            "--templates",
+            "55",
+            "--per-template",
+            "1",
+            "--force",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode != 0
+    assert "refusing" in proc.stderr
+    assert sorted(PROBLEM_DIR.glob("prob_*.json"))  # 何も消していない
