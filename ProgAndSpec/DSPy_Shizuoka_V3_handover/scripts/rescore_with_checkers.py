@@ -206,7 +206,8 @@ def main(argv: list[str] | None = None) -> int:
         args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"Rescored report: {args.output}")
 
-    names = [s for s in SUBSET_ORDER if s in subsets]
+    # 生成ホールドアウトの分割名（all, domain_*）は固定順に無いので、そのまま並べる。
+    names = [s for s in SUBSET_ORDER if s in subsets] or list(subsets)
     header = f"{'Condition':26}" + "".join(f"{name:>22}" for name in names)
     print("\nRescored vs original mean score")
     print(header)
