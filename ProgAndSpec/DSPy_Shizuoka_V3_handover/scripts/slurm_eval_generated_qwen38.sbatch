@@ -28,6 +28,10 @@ ROOT_DIR="$(cd "$HANDOVER_DIR/../.." && pwd)"
 RUN_NAME="${RUN_NAME:-generated140-qwen38-$(date +%Y%m%d)}"
 DATA_DIR="${DATA_DIR:-data/problems_generated}"
 SHARDS="${SHARDS:-4}"
+# 出力枠は思考と本文の合計。65536 にすると 32768 で切れていた思考が入るが、1 問 20 分超に
+# なるので LM の timeout も合わせて延ばす。
+MAX_TOKENS="${MAX_TOKENS:-32768}"
+LM_TIMEOUT="${LM_TIMEOUT:-1800}"
 READY_TIMEOUT_SEC="${READY_TIMEOUT_SEC:-1800}"
 # Why not 固定ポート: before と after のジョブが同じノードで同時に走るので、ジョブ ID で分ける。
 PORT=$((7600 + SLURM_JOB_ID % 100))
@@ -42,7 +46,7 @@ MODEL="$(manifest_field reflection model_id)"
 REV="$(manifest_field reflection revision)"
 
 echo "[$(date +%T)] job $SLURM_JOB_ID on $(hostname); GPU: ${CUDA_VISIBLE_DEVICES:-unset}; port $PORT"
-echo "[$(date +%T)] run=$RUN_NAME-$PROMPT data=$DATA_DIR shards=$SHARDS model=$MODEL"
+echo "[$(date +%T)] run=$RUN_NAME-$PROMPT data=$DATA_DIR shards=$SHARDS model=$MODEL max_tokens=$MAX_TOKENS lm_timeout=$LM_TIMEOUT"
 
 (
     cd "$ROOT_DIR"
@@ -81,5 +85,6 @@ uv run python scripts/compare_prompt_models.py \
     --data-dir "$DATA_DIR" --run-name "$RUN_NAME-$PROMPT" \
     --only-model qwen3_8_27b --only-prompt "$PROMPT" \
     --qwen38-api-base "http://127.0.0.1:$PORT/v1" \
+    --max-tokens "$MAX_TOKENS" --lm-timeout "$LM_TIMEOUT" \
     --parallel --shards "$SHARDS" 2>&1 | tee "$LOG_DIR/compare.log"
 echo "[$(date +%T)] done: outputs/prompt_model_comparisons/$RUN_NAME-$PROMPT/"

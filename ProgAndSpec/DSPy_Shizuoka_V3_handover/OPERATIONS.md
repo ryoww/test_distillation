@@ -473,6 +473,14 @@ PROMPT=before sbatch --export=ALL scripts/slurm_eval_generated_qwen38.sbatch
 PROMPT=after  sbatch --export=ALL scripts/slurm_eval_generated_qwen38.sbatch
 ```
 
+思考予算を変える実験は `MAX_TOKENS` と `LM_TIMEOUT` で行います。65,536 トークンでは 1 問が
+20 分を超えることがあるので、`LM_TIMEOUT=5400` と `sbatch --time=10:00:00` を併用します。
+
+```bash
+MAX_TOKENS=65536 LM_TIMEOUT=5400 RUN_NAME=generated140-qwen38-max64k-YYYYMMDD \
+  PROMPT=before sbatch --time=10:00:00 --export=ALL scripts/slurm_eval_generated_qwen38.sbatch
+```
+
 DSPy は `~/.dspy_cache` に応答をキャッシュします。temperature 0 で同じプロンプトとモデルなら、
 中断したジョブで生成済みの問題はキャッシュから即座に返るので、再投入しても生成し直しには
 なりません。条件を変えずに独立した再実行が必要なときはキャッシュを退避してください。
