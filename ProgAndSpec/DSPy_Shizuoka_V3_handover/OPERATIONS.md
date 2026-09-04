@@ -441,7 +441,12 @@ uv run python train_gepa_v3.py --eval-only --data-dir data/problems_generated \
 
 - 95問は数値目的を選択できますが、5問は数値目的がありません。
 - 旧チェッカー（feasibility.py 直登録の8 core_type）は `jobs` や `customers` キーのない
-  instance を検証せずに feasible と返します。構造検査だけで目的値の再計算はしません。
+  instance を検証せずに feasible と返します。同梱参照解の4つの形（prob_002・003・012・027）
+  だけは `feasibility_shapes.py` で ID・容量・目的値まで検証しますが、他の形は構造検査のみです。
+- prob_012（クラスタバッチジョブ）の同梱参照解は、割り当てたジョブの優先度合計 14 に対して
+  `total_priority: 6` と申告しており、参照値として使えません。
+- prob_027（配送＋在庫連立）は訪問先を選ぶ問題なので、訪問先が違う解どうしの総距離は比較
+  できません。参照値との比較は意味を持ちません。
 - 配送・輸送 系の同梱参照解は近似解で、prob_021 は容量制約に違反しています。
   この core_type の参照値は上限の目安にすぎません。
 - feasibility checker未登録の問題は `unverified` とし、参照一致・参照超えに数えません。

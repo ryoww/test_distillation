@@ -13,6 +13,13 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from .feasibility_shapes import (
+    check_cluster_node_assignment,
+    check_day1_routes,
+    check_flow_shop_sequence,
+    check_parallel_machine_assignment,
+)
+
 CHECKERS: dict[str, Callable[[dict, Any], bool]] = {}
 CHECKERS_DETAILED: dict[str, Callable[[dict, Any], dict]] = {}
 
@@ -435,21 +442,17 @@ def check_scheduling_jobshop_detailed(instance: dict, solution: any) -> dict:
             "cost": None,
         }
 
-    # 参照解が使う割当の形はキー名がまちまちなので、読める候補を順に探す。
-    schedule = None
-    for key in (
-        "schedule",
-        "assignments",
-        "assignment",
-        "machine_assignment",
-        "node_assignment",
-        "optimal_sequence",
-        "sequence",
-        "order",
+    # 同梱参照解固有の形は、要素数だけ見る従来処理ではなく厳密に検証する。
+    for strict in (
+        check_parallel_machine_assignment,
+        check_flow_shop_sequence,
+        check_cluster_node_assignment,
     ):
-        if solution.get(key):
-            schedule = solution[key]
-            break
+        result = strict(instance, solution)
+        if result is not None:
+            return result
+
+    schedule = solution.get("schedule", solution.get("assignments", solution.get("assignment")))
     if not schedule:
         violations.append("empty or missing schedule/assignments field")
         return {
@@ -479,20 +482,10 @@ def check_scheduling_jobshop_detailed(instance: dict, solution: any) -> dict:
             "cost": None,
         }
 
-    # Check that an objective is present. makespan is the usual one, but this checker
-    # also serves problems whose objective is a priority sum or an assignment count.
+    # Check makespan is present (main objective)
     makespan = solution.get("makespan", solution.get("total_time"))
     if makespan is None:
-        numeric = [
-            v
-            for k, v in solution.items()
-            if isinstance(v, (int, float)) and not isinstance(v, bool) and k != "note"
-        ]
-        if not numeric:
-            violations.append("no makespan or other numeric objective field in solution")
-        else:
-            # Why not require makespan: prob_012 の参照解は total_priority だけを持つ。
-            makespan = numeric[0]
+        violations.append("no makespan field in solution")
     elif makespan == 0:
         violations.append("makespan=0 (suspiciously low)")
 
@@ -597,9 +590,12 @@ def check_vrp_v3_detailed(instance: dict, solution: any) -> dict:
             "cost": None,
         }
 
-    # Why not routes only: 配送＋在庫連立（day1_routes）と動的VRP（initial_routes）の
-    # 参照解は初日・初期のルートだけを返す。
-    routes = solution.get("routes") or solution.get("day1_routes") or solution.get("initial_routes")
+    # 配送＋在庫連立の参照解は初日のルートだけを day1_routes で返すので、厳密に検証する。
+    strict = check_day1_routes(instance, solution)
+    if strict is not None:
+        return strict
+
+    routes = solution.get("routes")
     if not routes:
         violations.append("empty or missing routes field")
         return {

@@ -283,7 +283,7 @@ uv run python scripts/diagnose_effects.py \
 
 ---
 
-## 10. 追補（2026-09-04）: 旧チェッカーが参照解を弾いていた4問
+## 11. 追補（2026-09-04）: 旧チェッカーが参照解を弾いていた4問
 
 feasibility.py に直接登録された旧チェッカー（8 core_type）は、prob_002・003・012・027 の
 同梱参照解そのものを infeasible と判定していました。`schedule` / `assignments` / `assignment`
@@ -291,33 +291,51 @@ feasibility.py に直接登録された旧チェッカー（8 core_type）は、
 経路キー（`day1_routes`、`initial_routes`）を読めなかったためです。参照解と同じ形で返した
 正答が 0 点になる構造でした。
 
-キー候補を広げ、makespan が無い解では他の数値目的を objective として受けるようにしました。
-100問すべての参照解が自分のチェッカーを通ることは `tests/test_legacy_checkers.py` で固定しています。
+この4つの形については `src/utils/feasibility_shapes.py` で解析してから検証します。機械番号や
+ノードの範囲、順列の重複、ジョブ要求とノード容量、経路の倉庫発着と台数、そして makespan や
+total_priority の再計算まで行い、読めない形は従来処理へ戻します。キー名だけを広げて要素数を
+数える案は、無効な機械番号や重複した順列を通してしまうため採りませんでした。100問すべての
+参照解が自分のチェッカーを通ることは `tests/test_legacy_checkers.py` で固定しています。
 
 同じ保存済みコードを再採点した結果（`rescored-legacy-checkers-20260904.json`）:
 
 | 条件 | 問題 | 修正前 | 修正後 |
 |---|---|---|---|
-| after · Qwen3.6 | prob_002 / 003 | infeasible 0.00 | exact_match 1.50 |
-| after · Qwen3.6 | prob_012 / 027 | infeasible 0.00 | partial_feasible 0.28 / 0.16 |
-| after · Qwen3.8 | prob_002 | infeasible 0.00 | exact_match 1.50 |
-| before · Qwen3.6 | prob_003 | infeasible 0.00 | exact_match 1.50 |
+| after · Qwen3.6 / Qwen3.8 | prob_002 | infeasible 0.00 | exact_match 1.50 |
+| before · Qwen3.6, after · Qwen3.6 | prob_003 | infeasible 0.00 | exact_match 1.50 |
+| 4条件すべて | prob_012 | infeasible 0.00 | beat_reference 2.50（参照値 6 が誤り） |
+| after · Qwen3.6 | prob_027 | infeasible 0.00 | worse 0.00 |
+| before · Qwen3.8 | prob_027 | infeasible 0.00 | beat_reference 2.48（部分訪問） |
 | その他 | exec_error / gen_error の記録 | 変化なし | 変化なし |
 
-分割平均への影響は最大でも +0.045（untouched40、Qwen3.6 の before / after とも）で、
-before と after に同じ幅で乗るため、プロンプト効果の推定はほぼ動きません。
+分割平均への影響は最大 +0.100（untouched40、Qwen3.6 の before / after とも）で、
+before と after にほぼ同じ幅で乗るため、プロンプト効果の推定は動きません。
 
 | 条件 | untouched40 | train40 | all100 |
 |---|---|---|---|
-| before · Qwen3.6 | 0.960 → 1.004 | 0.820 → 0.826 | 0.887 → 0.907 |
-| after · Qwen3.6 | 0.907 → 0.951 | 1.180 → 1.221 | 1.064 → 1.098 |
-| before · Qwen3.8 | 0.563 → 0.570 | 0.455 → 0.459 | 0.514 → 0.518 |
-| after · Qwen3.8 | 0.576 → 0.583 | 0.797 → 0.835 | 0.653 → 0.671 |
+| before · Qwen3.6 | 0.960 → 1.055 | 0.820 → 0.820 | 0.887 → 0.925 |
+| after · Qwen3.6 | 0.907 → 1.007 | 1.180 → 1.216 | 1.064 → 1.118 |
+| before · Qwen3.8 | 0.563 → 0.625 | 0.455 → 0.517 | 0.514 → 0.564 |
+| after · Qwen3.8 | 0.576 → 0.639 | 0.797 → 0.835 | 0.653 → 0.693 |
 
-partial_feasible に留まる prob_012 / 027 は、チェッカーが構造しか見ないためモデル解の
-目的値が検証されず、旧メトリックの部分点になっています。
+厳密チェックにしたことで、prob_012 の同梱参照解そのものが弾かれるようになりました。
+node_assignment で割り当てた6ジョブの優先度合計は 14 ですが、参照解は `total_priority: 6`
+（assigned_count と同じ値）を申告しています。参照解側の欠陥なので、テストでは prob_012 だけを
+「チェッカーが弾く」ことを固定する別テストにしています。この問題の参照値 6 は目的値として
+意味を持たず、モデル解は正しければ `beat_reference` になります。
 
-## 11. 追補（2026-09-04）: 配送・輸送 の同梱参照解は近似解
+prob_027（配送＋在庫連立）は「配送を行うかどうかを判断」する問題で、発注点未満の顧客だけを
+回る解が正当です。チェッカーは倉庫発着・重複なし・台数以内を検証しますが、訪問先が違えば
+総距離は比較できません。before · Qwen3.8 の `beat_reference 2.48` は 2 顧客だけを回った経路の
+距離が全 6 顧客を回った参照解より短いだけで、良い解という意味ではありません。
+この問題の参照値も比較の基準としては使えません。
+
+モデルの回答は機械番号を 0 始まりで返し、`day1_routes` をリストで返していました。instance が
+台数しか与えない問題では 0 始まりも正当なので、0..m-1 か 1..m のどちらかに揃っていれば受けます。
+
+---
+
+## 12. 追補（2026-09-04）: 配送・輸送 の同梱参照解は近似解
 
 雛形生成器（`OPERATIONS.md` 7章）で厳密ソルバーを書く過程で、prob_021（基本 CVRP）の
 同梱参照解が容量 15 の車両 1 台に需要 25 を積む単一経路（総距離 245）であることが分かりました。
