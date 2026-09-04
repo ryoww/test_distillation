@@ -783,3 +783,14 @@ def test_shipped_corpus_keeps_untouched40_as_primary_subset():
     splits = compare.split_instance_ids(DATA_DIR)
     assert compare.whole_set_key(splits) == "all100"
     assert compare.primary_subset_key(splits) == "untouched40"
+
+
+def test_only_prompt_selects_one_prompt_for_dry_run(capsys):
+    """What: --only-prompt limits the child evaluators to that prompt's conditions."""
+    code = compare.main(
+        ["--dry-run", "--only-model", "qwen3_8_27b", "--only-prompt", "after", "--shards", "2"]
+    )
+    out = capsys.readouterr().out
+    assert code == 0
+    labels = [line.split("]")[0].strip("[") for line in out.splitlines() if line.startswith("[")]
+    assert labels == ["after__qwen3_8_27b__shard01of02", "after__qwen3_8_27b__shard02of02"]

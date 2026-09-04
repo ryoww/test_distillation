@@ -137,6 +137,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Evaluate both prompts for only this model so one model can occupy the GPU at a time.",
     )
     parser.add_argument(
+        "--only-prompt",
+        choices=("before", "after"),
+        help="Evaluate only this prompt so the two prompts can use separate model servers.",
+    )
+    parser.add_argument(
         "--merge-runs",
         nargs="+",
         type=Path,
@@ -597,8 +602,11 @@ def main(
     run_name = args.run_name or datetime.now().astimezone().strftime("prompt_model_%Y%m%d_%H%M%S")
     run_root = args.output_dir.expanduser().resolve() / run_name
     if args.merge_runs:
-        if args.dry_run or args.only_model:
-            print("--merge-runs cannot be combined with --dry-run or --only-model", file=sys.stderr)
+        if args.dry_run or args.only_model or args.only_prompt:
+            print(
+                "--merge-runs cannot be combined with --dry-run, --only-model or --only-prompt",
+                file=sys.stderr,
+            )
             return 2
         try:
             comparison = merge_comparison_runs(args.merge_runs, run_root, run_name)
@@ -616,6 +624,8 @@ def main(
         conditions = tuple(
             condition for condition in conditions if condition.model_target.label == args.only_model
         )
+    if args.only_prompt:
+        conditions = tuple(c for c in conditions if c.prompt_label == args.only_prompt)
     data_dir = args.data_dir.expanduser().resolve()
     subsets = split_instance_ids(data_dir)
     all_key = whole_set_key(subsets)

@@ -462,6 +462,21 @@ compare）に、結果は `outputs/prompt_model_comparisons/<run名>/factorial_c
 100 問の実測では Qwen3.6 が 1 条件あたり約 1 時間、Qwen3.8 が約 1.7 時間だったので、
 140 問 × 2 モデル同時実行は 3 時間前後を見込み、`--time` は 8 時間にしています。
 
+Qwen3.8 は Qwen3.6 の 3 倍以上遅く、4 条件同時実行では Qwen3.6 が終わった後に GPU 1 枚が
+遊びます。Qwen3.8 だけを取り直すときは `scripts/slurm_eval_generated_qwen38.sbatch` を
+`PROMPT=before` と `PROMPT=after` で 2 本投入します。GPU 1 枚のジョブなので、他ユーザーの
+ジョブと GPU を分け合う状況でも空いた順に走ります。
+
+```bash
+export RUN_NAME=generated140-qwen38-YYYYMMDD
+PROMPT=before sbatch --export=ALL scripts/slurm_eval_generated_qwen38.sbatch
+PROMPT=after  sbatch --export=ALL scripts/slurm_eval_generated_qwen38.sbatch
+```
+
+DSPy は `~/.dspy_cache` に応答をキャッシュします。temperature 0 で同じプロンプトとモデルなら、
+中断したジョブで生成済みの問題はキャッシュから即座に返るので、再投入しても生成し直しには
+なりません。条件を変えずに独立した再実行が必要なときはキャッシュを退避してください。
+
 ## 9. 既知の限界
 
 - 95問は数値目的を選択できますが、5問は数値目的がありません。
