@@ -66,11 +66,6 @@ def single_machine_tardiness():
     return generate, solve
 
 
-# Why not prob_002（同一並列機械）: 雛形の参照解 `machine_assignment` を
-# 旧チェッカー（スケジューリング_整数計画）が読めず infeasible と判定する。
-# チェッカー側を直すまでは、同じ問題族を prob_097 で代表させる。
-
-
 # ============================================================
 # ネットワークフロー
 # ============================================================
@@ -255,6 +250,62 @@ def bin_packing():
             if members:
                 bins[str(len(bins))] = members
         return {"min_bins": len(bins), "bins": bins, "note": "CP-SAT（厳密最適解）"}
+
+    return generate, solve
+
+
+@register(62, "min_height")
+def strip_packing():
+    """prob_062: 2次元ストリップパッキング。帯幅と矩形数は問題文にあるので雛形の値を保つ。"""
+
+    def generate(rng: random.Random, base: dict) -> dict:
+        width = base["strip_width"]
+        n = len(base["rectangles"])
+
+        def make() -> dict:
+            rects = [
+                {"id": i, "w": rng.randint(2, min(6, width)), "h": rng.randint(2, 6)}
+                for i in range(n)
+            ]
+            return {"strip_width": width, "rectangles": rects}
+
+        # 1 段に全部並ぶ instance は配置の自由度がないので除く。
+        return retry(rng, make, lambda inst: sum(r["w"] for r in inst["rectangles"]) > width)
+
+    def solve(instance: dict) -> dict:
+        cp_model, solver = cp_sat_solver()
+        width = instance["strip_width"]
+        rects = instance["rectangles"]
+        upper = sum(r["h"] for r in rects)
+        model = cp_model.CpModel()
+        height = model.NewIntVar(0, upper, "height")
+        xs, ys, x_iv, y_iv = [], [], [], []
+        for r in rects:
+            x = model.NewIntVar(0, width - r["w"], f"x{r['id']}")
+            y = model.NewIntVar(0, upper - r["h"], f"y{r['id']}")
+            xs.append(x)
+            ys.append(y)
+            x_iv.append(model.NewFixedSizeIntervalVar(x, r["w"], f"xi{r['id']}"))
+            y_iv.append(model.NewFixedSizeIntervalVar(y, r["h"], f"yi{r['id']}"))
+            model.Add(y + r["h"] <= height)
+        model.AddNoOverlap2D(x_iv, y_iv)
+        model.Minimize(height)
+        require_optimal(cp_model, solver.Solve(model))
+        placement = [
+            {
+                "id": r["id"],
+                "x": solver.Value(xs[i]),
+                "y": solver.Value(ys[i]),
+                "w": r["w"],
+                "h": r["h"],
+            }
+            for i, r in enumerate(rects)
+        ]
+        return {
+            "min_height": solver.Value(height),
+            "placement": placement,
+            "note": "CP-SAT NoOverlap2D（厳密最適解）",
+        }
 
     return generate, solve
 

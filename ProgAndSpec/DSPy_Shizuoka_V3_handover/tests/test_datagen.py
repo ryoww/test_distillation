@@ -34,10 +34,31 @@ def test_solver_reproduces_original_reference_value(template_id):
     template = TEMPLATES[template_id]
     base = load_base(PROBLEM_DIR, template_id)
     solved = template.solve(base["instance"])
-    assert solved[template.objective_key] == pytest.approx(
-        _objective_of(base, template.objective_key), rel=2e-3
-    )
+    shipped = _objective_of(base, template.objective_key)
+    if template.shipped_reference_optimal:
+        assert solved[template.objective_key] == pytest.approx(shipped, rel=2e-3)
+    else:
+        # 同梱参照解が近似解の雛形（最小化問題）。厳密解は参照値を下回らなければならない。
+        assert solved[template.objective_key] < shipped
     assert set(solved) == set(base["reference_solution"])
+
+
+def test_cvrp_shipped_reference_is_infeasible_and_exact_solution_is_feasible():
+    """prob_021 の同梱参照解は容量超過の単一経路で、厳密解のほうが良い。"""
+    base = load_base(PROBLEM_DIR, 21)
+    shipped_route = base["reference_solution"]["routes"]["3"]["route"]
+    load = sum(c["demand"] for c in base["instance"]["customers"] if c["id"] in shipped_route)
+    assert load > base["instance"]["vehicle_capacity"]
+    solved = TEMPLATES[21].solve(base["instance"])
+    assert solved["total_distance"] < base["reference_solution"]["total_distance"]
+    capacity = base["instance"]["vehicle_capacity"]
+    demand = {c["id"]: c["demand"] for c in base["instance"]["customers"]}
+    visited = []
+    for route in solved["routes"].values():
+        inner = route["route"][1:-1]
+        assert sum(demand[i] for i in inner) <= capacity
+        visited.extend(inner)
+    assert sorted(visited) == sorted(demand)
 
 
 @pytest.mark.parametrize("template_id", TEMPLATE_IDS)

@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-from . import templates as _templates  # noqa: F401  登録の副作用が必要
+# 登録の副作用が必要なので、雛形モジュールは読み込むだけでよい。
+from . import (  # noqa: F401
+    templates,
+    templates_assignment,
+    templates_composite,
+    templates_network,
+    templates_production,
+    templates_routing,
+    templates_scheduling,
+)
 from .base import TEMPLATES, SolveError, Template
 from .pipeline import (
     GENERATOR_VERSION,

@@ -24,17 +24,27 @@ class Template:
     objective_key: str
     generate: Callable[[random.Random, dict], dict]
     solve: Callable[[dict], dict]
+    # 同梱の参照解が厳密最適でない雛形は、参照値の再現ではなく参照値より良いことを検証する。
+    shipped_reference_optimal: bool = True
 
 
 TEMPLATES: dict[int, Template] = {}
 
 
-def register(problem_id: int, objective_key: str) -> Callable:
+def register(
+    problem_id: int, objective_key: str, *, shipped_reference_optimal: bool = True
+) -> Callable:
     """`(generate, solve)` の組を返す関数をテンプレートとして登録する。"""
 
     def decorator(factory: Callable[[], tuple[Callable, Callable]]):
         generate, solve = factory()
-        TEMPLATES[problem_id] = Template(problem_id, objective_key, generate, solve)
+        TEMPLATES[problem_id] = Template(
+            problem_id,
+            objective_key,
+            generate,
+            solve,
+            shipped_reference_optimal=shipped_reference_optimal,
+        )
         return factory
 
     return decorator
