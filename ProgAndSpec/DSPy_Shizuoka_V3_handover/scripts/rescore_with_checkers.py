@@ -26,6 +26,7 @@ if str(BASE_DIR) not in sys.path:
 from src import best_known as _best_known
 from src.data_loader import convert_to_dspy_example, load_v3_data
 from src.metrics_v3 import evaluate_algorithm_v3
+from src.modules import ensure_parse_helpers
 
 RESULT_FILENAME = "evaluation_results_v3_gepa_phaseE.json"
 DEFAULT_DATA_DIR = BASE_DIR / "data" / "problems"
@@ -82,8 +83,10 @@ def _rescore_shard(
             outcome.records.append({**row, "rescored": False})
             continue
 
+        # 保存当時は parse_code のヘルパーが実行時に無く NameError になっていたので、
+        # 再生時も forward と同じ規則で前置する。
         result = evaluate_algorithm_v3(
-            code=code,
+            code=ensure_parse_helpers(code),
             instance=example["instance"],
             core_type=example["core_type"],
             instance_id=instance_id,

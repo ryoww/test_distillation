@@ -244,3 +244,16 @@ def test_safe_run_returns_plain_python_types_for_numpy_results():
     assert ok, result
     assert result == {"cost": 1.5, "x": [1, 2], "n": 3}
     assert type(result["cost"]) is float and type(result["n"]) is int
+
+
+def test_safe_run_provides_iteration_and_numeric_builtins():
+    """What: next/iter/divmod and friends are available to generated code."""
+    code = (
+        "def solve(instance):\n"
+        "    it = iter([3, 4])\n"
+        "    q, r = divmod(7, 2)\n"
+        "    return {'first': next(it), 'q': q, 'r': r, 'fs': sorted(frozenset({1, 1, 2}))}\n"
+    )
+    ok, result = safe_run(code, {}, timeout=30)
+    assert ok, result
+    assert result == {"first": 3, "q": 3, "r": 1, "fs": [1, 2]}

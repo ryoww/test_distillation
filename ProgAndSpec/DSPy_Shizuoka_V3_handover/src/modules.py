@@ -157,6 +157,36 @@ def default_parse_code(instance: dict) -> str:
     return "\n".join(lines) if lines else "# No parse needed"
 
 
+# generate に見せる汎用アクセサ。requirement に実キーがあるので、モデルはこれを使っても
+# 使わなくてもよい。
+GENERIC_PARSE_CODE = (
+    "# Generic safe accessors for instance dict.\n"
+    "# The requirement text contains the exact keys and structure.\n"
+    "def get_list(d, key, default=None):\n"
+    "    val = d.get(key, default if default is not None else [])\n"
+    "    return val if isinstance(val, list) else (default if default is not None else [])\n"
+    "def get_dict(d, key, default=None):\n"
+    "    val = d.get(key, default if default is not None else {})\n"
+    "    return val if isinstance(val, dict) else (default if default is not None else {})\n"
+    "def get_scalar(d, key, default=0):\n"
+    "    val = d.get(key, default)\n"
+    "    return val if isinstance(val, (int, float)) else default\n"
+)
+_HELPER_CALL = re.compile(r"\bget_(?:list|dict|scalar)\s*\(")
+_HELPER_DEF = re.compile(r"^\s*def\s+get_(?:list|dict|scalar)\s*\(", re.M)
+
+
+def ensure_parse_helpers(code: str, parse_code: str = GENERIC_PARSE_CODE) -> str:
+    """アクセサを呼ぶのに定義していないコードへ、見せた parse_code を前置する。
+
+    Why not モデルに定義を強制する: 指示文は parse_code を「使えるヘルパー」として渡す
+    ので、呼ぶだけで済むと読むのは正当。実行時に無いのは採点側の欠陥。
+    """
+    if _HELPER_CALL.search(code) and not _HELPER_DEF.search(code):
+        return f"{parse_code}\n\n{code}"
+    return code
+
+
 class AlgorithmGenerator(dspy.Module):
     """要件と問題タイプを受けて `solve(instance)` の Python コードを返す。
 
@@ -199,19 +229,7 @@ class AlgorithmGenerator(dspy.Module):
         We use a generic parse_code (LLM will figure out actual keys from requirement text).
         """
         # Static parse code — LLM sees actual instance keys/structure in requirement text
-        parse_code = (
-            "# Generic safe accessors for instance dict.\n"
-            "# The requirement text contains the exact keys and structure.\n"
-            "def get_list(d, key, default=None):\n"
-            "    val = d.get(key, default if default is not None else [])\n"
-            "    return val if isinstance(val, list) else (default if default is not None else [])\n"
-            "def get_dict(d, key, default=None):\n"
-            "    val = d.get(key, default if default is not None else {})\n"
-            "    return val if isinstance(val, dict) else (default if default is not None else {})\n"
-            "def get_scalar(d, key, default=0):\n"
-            "    val = d.get(key, default)\n"
-            "    return val if isinstance(val, (int, float)) else default\n"
-        )
+        parse_code = GENERIC_PARSE_CODE
         # Allow override via parse_code_dict[core_type]
         if core_type in self.parse_code_dict:
             parse_code = self.parse_code_dict[core_type]
@@ -228,7 +246,7 @@ class AlgorithmGenerator(dspy.Module):
             core_type=core_type,
             parse_code=parse_code,
         )
-        code = strip_code_fence(out.algorithm_code)
+        code = ensure_parse_helpers(strip_code_fence(out.algorithm_code), parse_code)
         return dspy.Prediction(
             algorithm_code=code,
             parse_code=parse_code,
@@ -256,7 +274,7 @@ class AlgorithmGenerator(dspy.Module):
             core_type=core_type,
             return_schema=return_schema,
         )
-        improved_code = strip_code_fence(out.improved_code)
+        improved_code = ensure_parse_helpers(strip_code_fence(out.improved_code), parse_code)
         return dspy.Prediction(
             algorithm_code=improved_code,
             parse_code=parse_code,  # Keep parse code fixed

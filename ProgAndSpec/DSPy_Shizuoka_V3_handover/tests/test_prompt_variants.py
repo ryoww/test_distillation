@@ -129,3 +129,14 @@ def test_extra_program_rejects_reserved_labels():
         compare.parse_extra_programs(["after=/tmp/x.json"])
     with pytest.raises(ValueError):
         compare.parse_extra_programs(["nolabel"])
+
+
+def test_ensure_parse_helpers_prepends_only_when_called_but_undefined():
+    from src.modules import GENERIC_PARSE_CODE, ensure_parse_helpers
+
+    uses = "def solve(instance):\n    return {'n': len(get_list(instance, 'jobs'))}\n"
+    assert ensure_parse_helpers(uses).startswith(GENERIC_PARSE_CODE)
+    defines = "def get_list(d, k, default=None):\n    return d.get(k, [])\n" + uses
+    assert ensure_parse_helpers(defines) == defines
+    plain = "def solve(instance):\n    return {'n': len(instance.get('jobs', []))}\n"
+    assert ensure_parse_helpers(plain) == plain

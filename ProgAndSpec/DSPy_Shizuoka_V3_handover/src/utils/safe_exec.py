@@ -209,6 +209,27 @@ def _worker(code: str, instance: dict, q):
                 "StopIteration": StopIteration,
                 "Exception": Exception,
                 "BaseException": BaseException,
+                # 反復と数値のための無害な組み込み。無いと next() や divmod() を使う
+                # 正当なコードが NameError で落ち、モデルの誤りとして採点されてしまう。
+                "next": next,
+                "iter": iter,
+                "frozenset": frozenset,
+                "divmod": divmod,
+                "pow": pow,
+                "ord": ord,
+                "chr": chr,
+                "repr": repr,
+                "hash": hash,
+                "format": format,
+                "slice": slice,
+                "object": object,
+                "ZeroDivisionError": ZeroDivisionError,
+                "ArithmeticError": ArithmeticError,
+                "OverflowError": OverflowError,
+                "LookupError": LookupError,
+                "AssertionError": AssertionError,
+                "NotImplementedError": NotImplementedError,
+                "RecursionError": RecursionError,
                 "__import__": _safe_import,
             }
         }
