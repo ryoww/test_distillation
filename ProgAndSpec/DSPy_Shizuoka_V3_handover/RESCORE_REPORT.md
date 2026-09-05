@@ -402,7 +402,7 @@ Qwen3.6 を押し上げたので、untouched40 での点推定は −0.05 から
 
 生成 140 問の評価は Slurm（`scripts/slurm_eval_generated.sbatch`）で GPU 2 枚を使い、Qwen3.6 は
 1 条件 70 問 × 2 shard を約 1 時間で終えました。Qwen3.8 は 1 時間あたり約 30〜40 問で 8 時間の
-制限に収まらないと判断し、途中で止めて `slurm_eval_generated_qwen38.sbatch`（GPU 1 枚 × 1
+制限に収まらないと判断し、途中で止めて `slurm_eval_generated_qwen38.sbatch`（現在は `slurm_eval_generated_one.sbatch`、GPU 1 枚 × 1
 プロンプト）2 本に切り替えました。止めた時点までの生成は DSPy のキャッシュから再利用されます。
 
 ---

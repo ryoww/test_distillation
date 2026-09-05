@@ -8,7 +8,9 @@ V2 v5: パースコードを学習可能なモジュールに。
 
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 
 import dspy
 
@@ -32,6 +34,26 @@ def strip_code_fence(text: str) -> str:
     if text.lower().startswith("python\n"):
         return text[7:].strip()
     return text.strip("`").strip()
+
+
+def supplements_path_for(program_path: str | Path) -> Path:
+    """保存プログラム `x.json` に対する補足ファイル `x.supplements.json` の場所。"""
+    path = Path(program_path)
+    return path.with_name(f"{path.stem}.supplements.json")
+
+
+def load_supplements_for(program_path: str | Path) -> dict[str, str]:
+    """保存プログラムの隣に補足ファイルがあれば読む。無ければ空。
+
+    DSPy の save は predictor の状態しか書かないので、分野別補足は別ファイルに置く。
+    """
+    sidecar = supplements_path_for(program_path)
+    if not sidecar.is_file():
+        return {}
+    data = json.loads(sidecar.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or not all(isinstance(v, str) for v in data.values()):
+        raise ValueError(f"supplements must map core_type or domain to text: {sidecar}")
+    return data
 
 
 def analyze_instance_structure(instance: dict) -> str:
@@ -143,18 +165,31 @@ class AlgorithmGenerator(dspy.Module):
     - Phase 2: 固定されたparse_codeでalgorithm_codeだけを学習
     """
 
-    def __init__(self, parse_code_dict: dict = None):
+    def __init__(self, parse_code_dict: dict | None = None, supplements: dict | None = None):
         """
         Args:
             parse_code_dict: If provided, use these fixed parse codes per core_type.
                            Keys=core_type, Values=parse_code string.
                            Set in Phase 2 to freeze parsing.
+            supplements: Optional notes appended to the requirement, chosen per problem.
+                           Keys are a core_type ("分野_数理タイプ") or a domain ("分野");
+                           the core_type entry wins. Lets one short instruction stay
+                           general while problem-class guidance is injected only where
+                           it applies.
         """
         super().__init__()
         self.parse_instance = dspy.ChainOfThought(ParseInstance)
         self.generate = dspy.ChainOfThought(GenerateOptimizationAlgorithm)
         self.improve = dspy.ChainOfThought(ImproveAlgorithm)
         self.parse_code_dict = parse_code_dict or {}
+        self.supplements = dict(supplements or {})
+
+    def supplement_for(self, core_type: str) -> str:
+        """core_type に対応する補足文を返す。無ければ空文字。"""
+        if core_type in self.supplements:
+            return self.supplements[core_type]
+        domain = core_type.split("_", 1)[0]
+        return self.supplements.get(domain, "")
 
     def forward(self, requirement: str, core_type: str, **kwargs) -> dspy.Prediction:
         """Generate solve() code.
@@ -180,6 +215,12 @@ class AlgorithmGenerator(dspy.Module):
         # Allow override via parse_code_dict[core_type]
         if core_type in self.parse_code_dict:
             parse_code = self.parse_code_dict[core_type]
+
+        # Why not 指示文に全分野の補足を並べる: 無関係な分野の規則が文脈を埋め、モデルが
+        # 指示を取り違える。該当する分野の補足だけを requirement の末尾に付ける。
+        supplement = self.supplement_for(core_type)
+        if supplement:
+            requirement = f"{requirement}\n\n## Approach notes for this problem class\n{supplement}"
 
         # Generate algorithm with parse code
         out = self.generate(

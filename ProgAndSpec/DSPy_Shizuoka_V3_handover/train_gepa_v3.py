@@ -48,7 +48,7 @@ from src.lm_config import (
     qwen_configs_from_env,
 )
 from src.metrics_v3 import evaluate_algorithm_v3
-from src.modules import AlgorithmGenerator, default_parse_code
+from src.modules import AlgorithmGenerator, default_parse_code, load_supplements_for
 from src.requirement_builder import summarize_reference_solution
 from src.verify_loop import generate_verified, summarize_attempts
 
@@ -629,6 +629,9 @@ def main(argv=None):
             logger.info(f"Loading compiled program from {program_path}")
             compiled = AlgorithmGenerator()
             compiled.load(str(program_path))
+            compiled.supplements = load_supplements_for(program_path)
+            if compiled.supplements:
+                logger.info(f"Loaded {len(compiled.supplements)} instruction supplements")
 
             # Evaluate
             train_result = evaluate(

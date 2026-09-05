@@ -138,8 +138,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--only-prompt",
-        choices=("before", "after"),
-        help="Evaluate only this prompt so the two prompts can use separate model servers.",
+        help="Evaluate only this prompt label (before, after, or an --extra-program label).",
+    )
+    parser.add_argument(
+        "--extra-program",
+        action="append",
+        default=[],
+        metavar="LABEL=PATH",
+        help="Add a prompt condition from a saved DSPy program; repeatable.",
     )
     parser.add_argument(
         "--merge-runs",
@@ -408,6 +414,19 @@ def merge_comparison_runs(
     return comparison
 
 
+def parse_extra_programs(specs: Sequence[str]) -> list[tuple[str, Path]]:
+    """`LABEL=PATH` の並びを (label, path) にする。before / after は予約済み。"""
+    programs: list[tuple[str, Path]] = []
+    for spec in specs:
+        label, sep, raw_path = spec.partition("=")
+        if not sep or not label or not raw_path:
+            raise ValueError(f"--extra-program expects LABEL=PATH, got {spec!r}")
+        if label in ("before", "after") or any(label == seen for seen, _ in programs):
+            raise ValueError(f"duplicate or reserved prompt label {label!r}")
+        programs.append((label, Path(raw_path).expanduser().resolve()))
+    return programs
+
+
 def _conditions(
     args: argparse.Namespace, baseline_path: Path, improved_path: Path
 ) -> tuple[Condition, ...]:
@@ -415,9 +434,11 @@ def _conditions(
         ModelTarget("qwen3_6_27b", args.qwen36_model, args.qwen36_api_base, args.qwen36_revision),
         ModelTarget("qwen3_8_27b", args.qwen38_model, args.qwen38_api_base, args.qwen38_revision),
     )
+    prompts = [("before", baseline_path), ("after", improved_path)]
+    prompts.extend(parse_extra_programs(args.extra_program))
     return tuple(
         Condition(f"{prompt}__{model.label}", prompt, model, program)
-        for prompt, program in (("before", baseline_path), ("after", improved_path))
+        for prompt, program in prompts
         for model in models
     )
 
@@ -626,6 +647,9 @@ def main(
         )
     if args.only_prompt:
         conditions = tuple(c for c in conditions if c.prompt_label == args.only_prompt)
+        if not conditions:
+            print(f"Unknown prompt label: {args.only_prompt}", file=sys.stderr)
+            return 2
     data_dir = args.data_dir.expanduser().resolve()
     subsets = split_instance_ids(data_dir)
     all_key = whole_set_key(subsets)
@@ -643,8 +667,13 @@ def main(
             print(f"[{job.label}] {shlex.join(_build_command(job, args, run_root))}")
         return 0
 
-    if not improved_path.is_file():
-        print(f"Improved program not found: {improved_path}", file=sys.stderr)
+    missing = [
+        c.program_path
+        for c in conditions
+        if c.prompt_label != "before" and not c.program_path.is_file()
+    ]
+    if missing:
+        print(f"Program not found: {missing[0]}", file=sys.stderr)
         return 2
     try:
         run_root.mkdir(parents=True, exist_ok=False)
@@ -752,6 +781,9 @@ def main(
             "subset_counts": {name: len(ids) for name, ids in subsets.items()},
             "baseline_definition": "current uncompiled AlgorithmGenerator signature, no demos",
             "improved_definition": "saved GEPA Phase E program, including optimized instructions and demos",
+            "extra_programs": {
+                label: str(path) for label, path in parse_extra_programs(args.extra_program)
+            },
             "baseline_program_sha256": _sha256(baseline_path),
             "improved_program_sha256": _sha256(improved_path),
             "selected_models": sorted({condition.model_target.label for condition in conditions}),

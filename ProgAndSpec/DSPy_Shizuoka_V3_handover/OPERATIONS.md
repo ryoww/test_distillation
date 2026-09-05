@@ -462,23 +462,32 @@ compare）に、結果は `outputs/prompt_model_comparisons/<run名>/factorial_c
 100 問の実測では Qwen3.6 が 1 条件あたり約 1 時間、Qwen3.8 が約 1.7 時間だったので、
 140 問 × 2 モデル同時実行は 3 時間前後を見込み、`--time` は 8 時間にしています。
 
-Qwen3.8 は Qwen3.6 の 3 倍以上遅く、4 条件同時実行では Qwen3.6 が終わった後に GPU 1 枚が
-遊びます。Qwen3.8 だけを取り直すときは `scripts/slurm_eval_generated_qwen38.sbatch` を
-`PROMPT=before` と `PROMPT=after` で 2 本投入します。GPU 1 枚のジョブなので、他ユーザーの
-ジョブと GPU を分け合う状況でも空いた順に走ります。
+1 モデル × 1 プロンプト条件を GPU 1 枚で評価するジョブは `scripts/slurm_eval_generated_one.sbatch`
+です。Qwen3.8 は Qwen3.6 の 3 倍以上遅いので、条件ごとにジョブを分けると空いた GPU から
+順に走り、他ユーザーと GPU を分け合う状況でも止まりません。`MAX_TOKENS` の既定は 65,536、
+`LM_TIMEOUT` は 5,400 秒です（`RESCORE_REPORT.md` 15 章）。
 
 ```bash
-export RUN_NAME=generated140-qwen38-YYYYMMDD
-PROMPT=before sbatch --export=ALL scripts/slurm_eval_generated_qwen38.sbatch
-PROMPT=after  sbatch --export=ALL scripts/slurm_eval_generated_qwen38.sbatch
+export RUN_NAME=generated140-YYYYMMDD
+MODEL_LABEL=qwen3_8_27b PROMPT=before sbatch --export=ALL scripts/slurm_eval_generated_one.sbatch
+MODEL_LABEL=qwen3_8_27b PROMPT=after  sbatch --export=ALL scripts/slurm_eval_generated_one.sbatch
 ```
 
-思考予算を変える実験は `MAX_TOKENS` と `LM_TIMEOUT` で行います。65,536 トークンでは 1 問が
-20 分を超えることがあるので、`LM_TIMEOUT=5400` と `sbatch --time=10:00:00` を併用します。
+before / after 以外の指示文は、保存済み DSPy プログラムを `PROGRAM` で渡します。
+`scripts/build_prompt_variants.py` が `prompts/` に 2 つの変種を書き出します。
+
+- `compiled_program_v3_compact.json`: 共通原則だけの短い指示文（約 1.8KB）。demo は Phase E
+  と同じ 2 件なので、Phase E との差は指示文の本文だけです。
+- `compiled_program_v3_modular.json`: compact と同じ指示文に、`.supplements.json` の分野別補足
+  （9 分野、各 500 文字前後）を実行時に 1 つだけ選んで requirement の末尾に付けます。
+  補足の選択は `AlgorithmGenerator.supplement_for` が core_type から行います。
 
 ```bash
-MAX_TOKENS=65536 LM_TIMEOUT=5400 RUN_NAME=generated140-qwen38-max64k-YYYYMMDD \
-  PROMPT=before sbatch --time=10:00:00 --export=ALL scripts/slurm_eval_generated_qwen38.sbatch
+uv run python scripts/build_prompt_variants.py
+MODEL_LABEL=qwen3_6_27b PROMPT=compact PROGRAM=prompts/compiled_program_v3_compact.json \
+  sbatch --export=ALL scripts/slurm_eval_generated_one.sbatch
+MODEL_LABEL=qwen3_6_27b PROMPT=modular PROGRAM=prompts/compiled_program_v3_modular.json \
+  sbatch --export=ALL scripts/slurm_eval_generated_one.sbatch
 ```
 
 DSPy は `~/.dspy_cache` に応答をキャッシュします。temperature 0 で同じプロンプトとモデルなら、
