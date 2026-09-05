@@ -33,12 +33,14 @@ BANNED_MODULES = {
     "pickle",
 }
 
+# Why not getattr も禁止: モデルは getattr(res, "success") のように結果オブジェクトへ
+# 防御的にアクセスする。名前を実行時に検査する _safe_getattr を与えれば、動的に組んだ
+# dunder 名も弾けるので、静的な禁止は要らない。
 BANNED_NAMES = {
     "open",
     "exec",
     "compile",
     "input",
-    "getattr",
     "setattr",
     "vars",
     "globals",
@@ -112,6 +114,23 @@ def _validate_ast(code: str) -> tuple[bool, str]:
             if isinstance(key, ast.Constant) and key.value in BANNED_SUBSCRIPT_KEYS:
                 return False, f"Banned subscript key: {key.value}"
     return True, ""
+
+
+def _attribute_allowed(name: Any) -> bool:
+    """属性名が文字列で、非公開でも危険な名前でもないときだけ許す。"""
+    return isinstance(name, str) and not name.startswith("_") and name not in BANNED_ATTRIBUTES
+
+
+def _safe_getattr(obj: Any, name: Any, *default: Any) -> Any:
+    if not _attribute_allowed(name):
+        raise AttributeError(f"attribute access to {name!r} is not allowed")
+    return getattr(obj, name, *default)
+
+
+def _safe_hasattr(obj: Any, name: Any) -> bool:
+    if not _attribute_allowed(name):
+        raise AttributeError(f"attribute access to {name!r} is not allowed")
+    return hasattr(obj, name)
 
 
 def _to_plain(value: Any) -> Any:
@@ -211,6 +230,8 @@ def _worker(code: str, instance: dict, q):
                 "BaseException": BaseException,
                 # 反復と数値のための無害な組み込み。無いと next() や divmod() を使う
                 # 正当なコードが NameError で落ち、モデルの誤りとして採点されてしまう。
+                "getattr": _safe_getattr,
+                "hasattr": _safe_hasattr,
                 "next": next,
                 "iter": iter,
                 "frozenset": frozenset,

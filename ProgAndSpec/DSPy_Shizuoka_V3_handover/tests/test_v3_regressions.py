@@ -257,3 +257,27 @@ def test_safe_run_provides_iteration_and_numeric_builtins():
     ok, result = safe_run(code, {}, timeout=30)
     assert ok, result
     assert result == {"first": 3, "q": 3, "r": 1, "fs": [1, 2]}
+
+
+def test_safe_run_allows_public_getattr_but_blocks_private_names():
+    """What: getattr on public attributes works; dunder names built at run time are refused."""
+    ok, result = safe_run(
+        "from scipy.optimize import linprog\n"
+        "def solve(instance):\n"
+        "    res = linprog(c=[1.0], bounds=[(0, 1)], method='highs')\n"
+        "    return {'ok': bool(getattr(res, 'success', False)), 'has': hasattr(res, 'x')}\n",
+        {},
+        timeout=30,
+    )
+    assert ok, result
+    assert result == {"ok": True, "has": True}
+    ok, result = safe_run(
+        "def solve(instance):\n    return getattr((1).__class__, '__cl' + 'ass__')\n",
+        {},
+        timeout=10,
+    )
+    assert not ok
+    ok, result = safe_run(
+        "def solve(instance):\n    return getattr(1, '__cl' + 'ass__')\n", {}, timeout=10
+    )
+    assert not ok and "not allowed" in str(result)
