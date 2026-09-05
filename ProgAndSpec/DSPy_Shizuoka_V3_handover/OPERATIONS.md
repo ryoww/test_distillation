@@ -478,6 +478,8 @@ before / after 以外の指示文は、保存済み DSPy プログラムを `PRO
 
 - `compiled_program_v3_compact.json`: 共通原則だけの短い指示文（約 1.8KB）。demo は Phase E
   と同じ 2 件なので、Phase E との差は指示文の本文だけです。
+- `compiled_program_v3_before_demos.json`: 初期指示文に Phase E と同じ demo 2 件だけを付けた対照条件。
+  compact − before の差が本文によるものか demo によるものかを切り分けます。
 - `compiled_program_v3_modular.json`: compact と同じ指示文に、`.supplements.json` の分野別補足
   （9 分野、各 500 文字前後）を実行時に 1 つだけ選んで requirement の末尾に付けます。
   補足の選択は `AlgorithmGenerator.supplement_for` が core_type から行います。

@@ -5,6 +5,7 @@
   Phase E との差は指示文の本文だけになる。
 - modular: compact と同じ指示文に、問題の分野ごとの補足を実行時に選んで付ける。
   補足は `<program>.supplements.json` に置き、train_gepa_v3.py --eval-only が読む。
+- before_demos: 初期指示文 + Phase E の demo 2 件。demo の効果だけを測る対照条件。
 
 どちらも parse_instance / improve の指示文は初期のまま（Phase E も同じ）。
 """
@@ -60,6 +61,12 @@ def main() -> None:
     demos = phase_e_demos(args.phase_e)
     supplements = json.loads(args.supplements.read_text(encoding="utf-8"))
 
+    # 対照条件: 初期指示文に Phase E と同じ demo だけを付ける。compact − before の差が
+    # 指示文の本文によるものか demo によるものかを切り分けるために要る。
+    original = AlgorithmGenerator().generate.predict.signature.instructions
+    before_demos = build_variant(
+        original, demos, args.output_dir / "compiled_program_v3_before_demos.json"
+    )
     compact = build_variant(
         instructions, demos, args.output_dir / "compiled_program_v3_compact.json"
     )
@@ -71,7 +78,7 @@ def main() -> None:
         json.dumps(supplements, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
 
-    for path in (compact, modular, sidecar):
+    for path in (before_demos, compact, modular, sidecar):
         print(path.relative_to(BASE_DIR), path.stat().st_size, "bytes")
     print(
         f"instructions: {len(instructions)} chars; demos: {len(demos)}; domains: {len(supplements)}"

@@ -93,6 +93,14 @@ def test_shipped_variants_are_shorter_than_phase_e_and_carry_all_domains():
     assert load_supplements_for(BASE_DIR / "prompts" / "compiled_program_v3_compact.json") == {}
 
 
+def test_before_demos_variant_keeps_the_original_instructions():
+    loaded = AlgorithmGenerator()
+    loaded.load(str(BASE_DIR / "prompts" / "compiled_program_v3_before_demos.json"))
+    original = AlgorithmGenerator().generate.predict.signature.instructions
+    assert loaded.generate.predict.signature.instructions == original
+    assert len(loaded.generate.predict.demos) == 2
+
+
 def test_extra_program_adds_a_prompt_condition_for_dry_run(capsys, tmp_path):
     program = tmp_path / "x.json"
     program.write_text("{}", encoding="utf-8")
