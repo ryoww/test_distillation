@@ -478,6 +478,8 @@ before / after 以外の指示文は、保存済み DSPy プログラムを `PRO
 
 - `compiled_program_v3_compact.json`: 共通原則だけの短い指示文（約 1.8KB）。demo は Phase E
   と同じ 2 件なので、Phase E との差は指示文の本文だけです。
+  最終採点系では Phase E と統計的に同等で（`RESCORE_REPORT.md` 16 章）、今後の既定の指示文として
+  推奨します。
 - `compiled_program_v3_before_demos.json`: 初期指示文に Phase E と同じ demo 2 件だけを付けた対照条件。
   compact − before の差が本文によるものか demo によるものかを切り分けます。
 - `compiled_program_v3_modular.json`: compact と同じ指示文に、`.supplements.json` の分野別補足
@@ -512,6 +514,8 @@ DSPy は `~/.dspy_cache` に応答をキャッシュします。temperature 0 �
 - `safe_exec` は既知のdunder/import迂回を拒否しますが、Python sandboxを安全境界とは
   みなしません。信頼できない生成コードは、権限を落としたコンテナ等で実行してください。
 - 既定のbreadth 6 / depth 8は長時間実行です。接続確認では小さい値を使います。
+- Phase E の指示文の優位は採点系の欠陥への適応で、修正後は初期指示文や compact と区別できません
+  （`RESCORE_REPORT.md` 16 章）。GEPA を再学習する前に、採点系が直っていることを確認してください。
 - Qwen3.8 は思考が `max_tokens` 32,768 を使い切って本文が空になる問題が 140 問中 21〜35 問
   あります。65,536 にすると 4〜13 問に減り、Qwen3.6 との差の大半が消えます
   （`RESCORE_REPORT.md` 14〜15 章）。Qwen3.8 を含む比較では `MAX_TOKENS=65536` を使ってください。
