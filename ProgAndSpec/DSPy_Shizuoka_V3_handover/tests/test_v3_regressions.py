@@ -281,3 +281,24 @@ def test_safe_run_allows_public_getattr_but_blocks_private_names():
         "def solve(instance):\n    return getattr(1, '__cl' + 'ass__')\n", {}, timeout=10
     )
     assert not ok and "not allowed" in str(result)
+
+
+def test_safe_run_converts_numpy_dict_keys_and_blocks_module_smuggling():
+    """What: numpy scalars used as dict keys come back plain; from-import cannot fetch os or sys."""
+    ok, result = safe_run(
+        "import numpy as np\n"
+        "def solve(instance):\n"
+        "    return {np.float64(1.5): 'a', np.int64(2): 'b', (np.int64(1), 'x'): 'c'}\n",
+        {},
+        timeout=30,
+    )
+    assert ok, result
+    assert result == {1.5: "a", 2: "b", (1, "x"): "c"}
+    assert all(type(k) in (float, int, tuple) for k in result)
+    for code in (
+        "from typing import sys\ndef solve(instance):\n    return sys.modules['os'].getcwd()\n",
+        "from scipy import os\ndef solve(instance):\n    return os.getcwd()\n",
+    ):
+        ok, result = safe_run(code, {}, timeout=10)
+        assert not ok, result
+        assert "not allowed" in str(result) or "cannot import name" in str(result), result

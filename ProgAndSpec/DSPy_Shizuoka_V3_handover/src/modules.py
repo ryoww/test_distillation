@@ -8,6 +8,7 @@ V2 v5: パースコードを学習可能なモジュールに。
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -172,8 +173,31 @@ GENERIC_PARSE_CODE = (
     "    val = d.get(key, default)\n"
     "    return val if isinstance(val, (int, float)) else default\n"
 )
-_HELPER_CALL = re.compile(r"\bget_(?:list|dict|scalar)\s*\(")
-_HELPER_DEF = re.compile(r"^\s*def\s+get_(?:list|dict|scalar)\s*\(", re.M)
+_HELPER_NAMES = frozenset({"get_list", "get_dict", "get_scalar"})
+
+
+def _helper_usage(code: str) -> tuple[set[str], set[str]]:
+    """AST で、呼ばれているヘルパー名と、モジュール内で束縛されているヘルパー名を集める。"""
+    tree = ast.parse(code)
+    called: set[str] = set()
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in _HELPER_NAMES:
+                called.add(node.func.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name in _HELPER_NAMES:
+                bound.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in _HELPER_NAMES:
+                    bound.add(target.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound_name = alias.asname or alias.name.split(".")[0]
+                if bound_name in _HELPER_NAMES:
+                    bound.add(bound_name)
+    return called, bound
 
 
 def ensure_parse_helpers(code: str, parse_code: str = GENERIC_PARSE_CODE) -> str:
@@ -181,8 +205,15 @@ def ensure_parse_helpers(code: str, parse_code: str = GENERIC_PARSE_CODE) -> str
 
     Why not モデルに定義を強制する: 指示文は parse_code を「使えるヘルパー」として渡す
     ので、呼ぶだけで済むと読むのは正当。実行時に無いのは採点側の欠陥。
+    Why not 正規表現: 文字列やコメント中の `get_list(` に反応し、`get_list = ...` や
+    `from x import get_list` を定義と見なせない。構文エラーのコードはどうせ実行できないので
+    そのまま返す。
     """
-    if _HELPER_CALL.search(code) and not _HELPER_DEF.search(code):
+    try:
+        called, bound = _helper_usage(code)
+    except SyntaxError:
+        return code
+    if called - bound:
         return f"{parse_code}\n\n{code}"
     return code
 

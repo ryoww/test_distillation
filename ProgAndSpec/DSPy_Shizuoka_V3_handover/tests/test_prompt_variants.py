@@ -140,3 +140,18 @@ def test_ensure_parse_helpers_prepends_only_when_called_but_undefined():
     assert ensure_parse_helpers(defines) == defines
     plain = "def solve(instance):\n    return {'n': len(instance.get('jobs', []))}\n"
     assert ensure_parse_helpers(plain) == plain
+
+
+def test_ensure_parse_helpers_ignores_strings_and_respects_other_bindings():
+    from src.modules import GENERIC_PARSE_CODE, ensure_parse_helpers
+
+    in_string = "def solve(instance):\n    return {'note': 'call get_list(x) here'}\n"
+    assert ensure_parse_helpers(in_string) == in_string
+    via_lambda = "get_list = lambda d, k, default=None: d.get(k, [])\ndef solve(instance):\n    return {'n': len(get_list(instance, 'jobs'))}\n"
+    assert ensure_parse_helpers(via_lambda) == via_lambda
+    via_import = "from helpers import get_list\ndef solve(instance):\n    return get_list(instance, 'jobs')\n"
+    assert ensure_parse_helpers(via_import) == via_import
+    broken = "def solve(instance:\n    return get_list(instance, 'jobs')\n"
+    assert ensure_parse_helpers(broken) == broken
+    uses = "def solve(instance):\n    return {'n': len(get_scalar(instance, 'n'))}\n"
+    assert ensure_parse_helpers(uses).startswith(GENERIC_PARSE_CODE)

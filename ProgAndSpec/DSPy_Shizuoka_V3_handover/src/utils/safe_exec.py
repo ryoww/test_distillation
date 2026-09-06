@@ -10,6 +10,7 @@ import ast
 import multiprocessing
 import textwrap
 import traceback
+import types
 from queue import Empty
 from typing import Any
 
@@ -133,6 +134,18 @@ def _safe_hasattr(obj: Any, name: Any) -> bool:
     return hasattr(obj, name)
 
 
+def _plain_key(key: Any) -> Any:
+    """辞書キーも numpy 型を落とす。tuple はそのまま、hash できなくなる値は文字列にする。"""
+    if isinstance(key, tuple):
+        return tuple(_plain_key(k) for k in key)
+    plain = _to_plain(key)
+    try:
+        hash(plain)
+    except TypeError:
+        return str(plain)
+    return plain
+
+
 def _to_plain(value: Any) -> Any:
     """numpy 等の外部型を JSON 互換の Python 型へ再帰的に変換する。
 
@@ -140,10 +153,7 @@ def _to_plain(value: Any) -> Any:
     tolist / item を持つかで外部型を判定する。
     """
     if isinstance(value, dict):
-        return {
-            k if isinstance(k, (str, int, float, bool)) else str(k): _to_plain(v)
-            for k, v in value.items()
-        }
+        return {_plain_key(k): _to_plain(v) for k, v in value.items()}
     if isinstance(value, (list, tuple, set, frozenset)):
         return [_to_plain(v) for v in value]
     if value is None or type(value) in (str, int, float, bool):
@@ -180,10 +190,18 @@ def _worker(code: str, instance: dict, q):
             if top in _preimported and not fromlist and "." not in name:
                 return _preimported[top]
             try:
-                return __import__(name, globals_dict, locals_dict, fromlist, level)
+                module = __import__(name, globals_dict, locals_dict, fromlist, level)
             except (ModuleNotFoundError, ImportError) as e:
                 # If the module is not installed, raise ImportError so user code can catch it
                 raise ImportError(str(e)) from e
+            # Why not 名前だけ検査: `from typing import sys` は許可モジュールから禁止モジュール
+            # を持ち出す。取り出す属性がモジュールなら、その属性自身も許可リストで検査する。
+            for attr in fromlist or ():
+                obj = getattr(module, attr, None)
+                if isinstance(obj, types.ModuleType):
+                    if obj.__name__.split(".")[0] not in ALLOWED_IMPORTS:
+                        raise ImportError(f"Import of {name}.{attr} is not allowed")
+            return module
 
         _printed_output = []
 
