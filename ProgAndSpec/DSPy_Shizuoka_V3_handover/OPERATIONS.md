@@ -346,6 +346,12 @@ RUN_NAME=gepa-compact-YYYYMMDD sbatch --export=ALL scripts/slurm_gepa_retrain.sb
 `outputs/<run名>/compiled_program_v3_gepa_phaseE.json` に出るので、生成ホールドアウトでの評価は
 `slurm_eval_generated_one.sbatch` に `PROMPT=<ラベル> PROGRAM=<そのパス>` で渡します。
 
+2026-09-07 の再学習（GPU 2 枚で 11 時間 22 分）で得たプログラムは
+`prompts/compiled_program_v3_gepa_compact.json` に置いています。生成 140 問では Qwen3.8 で
+before に +0.17、compact に +0.12 の有意な差を示しましたが、効果は GEPA が見た雛形の未知
+instance に集中し、指示文は 34KB です（`RESCORE_REPORT.md` 17 章）。Qwen3.6 だけを使うなら
+compact で十分です。
+
 
 参照あり:
 
@@ -532,6 +538,8 @@ DSPy は `~/.dspy_cache` に応答をキャッシュします。temperature 0 �
 - 既定のbreadth 6 / depth 8は長時間実行です。接続確認では小さい値を使います。
 - Phase E の指示文の優位は採点系の欠陥への適応で、修正後は初期指示文や compact と区別できません
   （`RESCORE_REPORT.md` 16 章）。GEPA を再学習する前に、採点系が直っていることを確認してください。
+- 修正済み採点系で再学習した GEPA（17 章）は Qwen3.8 で有意に効きますが、検証 13 問は満点で
+  飽和し、学んだ規則は見た雛形に固有です。見ていない問題種別への汎化は測れていません。
 - Qwen3.8 は思考が `max_tokens` 32,768 を使い切って本文が空になる問題が 140 問中 21〜35 問
   あります。65,536 にすると 4〜13 問に減り、Qwen3.6 との差の大半が消えます
   （`RESCORE_REPORT.md` 14〜15 章）。Qwen3.8 を含む比較では `MAX_TOKENS=65536` を使ってください。
