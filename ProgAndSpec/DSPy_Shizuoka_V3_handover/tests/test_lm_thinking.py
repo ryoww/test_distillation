@@ -42,7 +42,7 @@ def test_enabling_thinking_explicitly_also_sends_the_flag():
 
 
 def test_default_output_budget_covers_thinking_and_the_answer():
-    assert DEFAULT_MAX_TOKENS == 32768
+    assert DEFAULT_MAX_TOKENS == 65536
     assert _captured(_config())["max_tokens"] == DEFAULT_MAX_TOKENS
 
 

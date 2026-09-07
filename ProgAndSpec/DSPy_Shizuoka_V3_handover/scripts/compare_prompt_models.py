@@ -128,8 +128,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--output-dir", type=Path, default=BASE_DIR / "outputs" / "prompt_model_comparisons"
     )
     parser.add_argument("--run-name")
-    parser.add_argument("--max-tokens", type=_positive_int, default=32768)
-    parser.add_argument("--lm-timeout", type=_positive_int, default=1800)
+    parser.add_argument("--max-tokens", type=_positive_int, default=65536)
+    parser.add_argument("--lm-timeout", type=_positive_int, default=5400)
     parser.add_argument("--temperature", type=_nonnegative_float, default=0.0)
     parser.add_argument(
         "--only-model",
@@ -779,7 +779,7 @@ def main(
             "serving": serving,
             "subset_instance_ids": subsets,
             "subset_counts": {name: len(ids) for name, ids in subsets.items()},
-            "baseline_definition": "current uncompiled AlgorithmGenerator signature, no demos",
+            "baseline_definition": "current uncompiled AlgorithmGenerator signature (compact since 2026-09-07), no demos",
             "improved_definition": "saved GEPA Phase E program, including optimized instructions and demos",
             "extra_programs": {
                 label: str(path) for label, path in parse_extra_programs(args.extra_program)

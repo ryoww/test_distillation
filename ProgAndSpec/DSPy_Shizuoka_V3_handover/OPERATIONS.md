@@ -110,9 +110,10 @@ Qwen3系のchat templateは`enable_thinking`が未指定なら思考を開きま
 `reasoning_content`へ分離されます。付けないと`<think>`が本文に混ざったまま
 DSPyのJSONAdapterへ渡り、構造化出力のパースを妨げます。
 
-出力枠は思考文と最終出力の合計です。既定を32,768 tokensにしており、上限は
+出力枠は思考文と最終出力の合計です。既定は 65,536 tokens（2026-09-07 まで 32,768）で、上限は
 `max_model_len` から入力長を引いた値です（Phase Eの先頭問題で入力8,905 tokens）。
-timeoutは1800秒を維持します。
+32,768 では Qwen3.8 の思考が切れて本文が空になる問題が 140 問中 21〜35 問あり、65,536 で
+4〜13 問に減ります（`RESCORE_REPORT.md` 15 章）。timeout の既定は 5,400 秒です。
 
 保存済みPhase Eプログラムの先頭問題は、Qwen3.6 tokenizerで入力8,905 tokensでした。
 context長は入力と最大出力の合計を収める必要があるため、比較時は131072を指定します。
@@ -330,6 +331,21 @@ uv run python scripts/rescore_with_checkers.py \
 その過程で見つかった欠陥は `RESCORE_REPORT.md` にまとめてあります。
 
 ## 5. GEPA再学習
+
+2026-09-07 から、未コンパイルの `AlgorithmGenerator` の generate 指示文は compact
+（[src/signatures.py](src/signatures.py)、約 1.8KB）です。旧指示文は
+`prompts/original_generate_instructions.md` に残しています。GEPA 再学習はこの compact を
+初期指示文として始まります。Slurm では `scripts/slurm_gepa_retrain.sbatch` が GPU 2 枚で
+生成 LM と反省 LM を立ててから学習を回します。
+
+```bash
+RUN_NAME=gepa-compact-YYYYMMDD sbatch --export=ALL scripts/slurm_gepa_retrain.sbatch
+```
+
+`--num-threads`（既定 8）で候補の評価を並列に投げます。学習済みプログラムは
+`outputs/<run名>/compiled_program_v3_gepa_phaseE.json` に出るので、生成ホールドアウトでの評価は
+`slurm_eval_generated_one.sbatch` に `PROMPT=<ラベル> PROGRAM=<そのパス>` で渡します。
+
 
 参照あり:
 

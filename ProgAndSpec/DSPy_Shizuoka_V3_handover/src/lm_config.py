@@ -14,7 +14,11 @@ DEFAULT_REFLECTION_API_BASE = "http://127.0.0.1:7502/v1"
 
 
 # thinkingと最終出力の合計がこの枠に収まる必要がある。上限は max_model_len - 入力長。
-DEFAULT_MAX_TOKENS = 32768
+# Why not 32768: Qwen3.8 は思考だけで 32k を使い切り、140 問中 21〜35 問で本文が空になった。
+# 65536 なら 4〜13 問に減る（RESCORE_REPORT.md 15 章）。context 131072 に対し入力は約 9k。
+DEFAULT_MAX_TOKENS = 65536
+# 65k の思考は 1 問 20 分を超えることがあるので、timeout もそれに合わせる。
+DEFAULT_TIMEOUT = 5400
 
 
 def _thinking_from_env(name: str) -> bool | None:
@@ -32,7 +36,7 @@ class LMConfig:
     api_key: str = "local"
     temperature: float = 0.2
     max_tokens: int = DEFAULT_MAX_TOKENS
-    timeout: int = 1800
+    timeout: int = DEFAULT_TIMEOUT
     enable_thinking: bool | None = None
     """None なら chat template の既定に従う。Qwen3系の既定は thinking 有効。"""
 
@@ -48,9 +52,7 @@ def create_lm(config: LMConfig) -> dspy.LM:
     # template は enable_thinking 未指定なら thinking を開くので、送らないことが
     # 「モデルに好きなだけ考えさせる」既定になる。
     if config.enable_thinking is not None:
-        kwargs["extra_body"] = {
-            "chat_template_kwargs": {"enable_thinking": config.enable_thinking}
-        }
+        kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": config.enable_thinking}}
     return dspy.LM(
         model=_dspy_model_name(config.model),
         api_base=config.api_base,
@@ -79,7 +81,7 @@ def configure_lm(lm_cfg: dict) -> bool:
             api_key=api_key,
             temperature=lm_cfg.get("temperature", 0.2),
             max_tokens=lm_cfg.get("max_tokens", DEFAULT_MAX_TOKENS),
-            timeout=lm_cfg.get("timeout", 1800),
+            timeout=lm_cfg.get("timeout", DEFAULT_TIMEOUT),
         )
     )
     dspy.settings.configure(lm=lm)
@@ -95,7 +97,7 @@ def qwen_configs_from_env() -> tuple[LMConfig, LMConfig]:
         temperature=float(os.getenv("DSPY_GENERATION_TEMPERATURE", "0.2")),
         max_tokens=int(os.getenv("DSPY_GENERATION_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
         enable_thinking=_thinking_from_env("DSPY_GENERATION_ENABLE_THINKING"),
-        timeout=int(os.getenv("DSPY_GENERATION_TIMEOUT", "1800")),
+        timeout=int(os.getenv("DSPY_GENERATION_TIMEOUT", str(DEFAULT_TIMEOUT))),
     )
     reflection = LMConfig(
         model=os.getenv("DSPY_REFLECTION_MODEL", DEFAULT_REFLECTION_MODEL),
@@ -104,7 +106,7 @@ def qwen_configs_from_env() -> tuple[LMConfig, LMConfig]:
         temperature=float(os.getenv("DSPY_REFLECTION_TEMPERATURE", "0.2")),
         max_tokens=int(os.getenv("DSPY_REFLECTION_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
         enable_thinking=_thinking_from_env("DSPY_REFLECTION_ENABLE_THINKING"),
-        timeout=int(os.getenv("DSPY_REFLECTION_TIMEOUT", "1800")),
+        timeout=int(os.getenv("DSPY_REFLECTION_TIMEOUT", str(DEFAULT_TIMEOUT))),
     )
     return generation, reflection
 

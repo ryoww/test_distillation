@@ -44,6 +44,7 @@ from src.lm_config import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_REFLECTION_API_BASE,
     DEFAULT_REFLECTION_MODEL,
+    DEFAULT_TIMEOUT,
     configure_qwen_pair,
     qwen_configs_from_env,
 )
@@ -209,6 +210,7 @@ def run_gepa_training(
     out_tag="phaseE",
     reflection_lm=None,
     output_dir=BASE_DIR / "outputs",
+    num_threads=8,
 ):
     """GEPAによる最適化訓練。"""
 
@@ -257,6 +259,7 @@ def run_gepa_training(
         track_stats=True,
         log_dir=log_dir,
         seed=42,
+        num_threads=num_threads,
     )
 
     compiled = optimizer.compile(
@@ -461,6 +464,9 @@ def evaluate(
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="V3 GEPA Training")
     parser.add_argument("--breadth", type=int, default=6, help="GEPA breadth")
+    parser.add_argument(
+        "--num-threads", type=int, default=8, help="GEPA の候補評価を並列に投げるスレッド数"
+    )
     parser.add_argument("--depth", type=int, default=8, help="GEPA depth")
     parser.add_argument(
         "--data-dir",
@@ -515,7 +521,7 @@ def parse_args(argv=None):
         default=None,
         help="Send enable_thinking=false. Omit to let the chat template decide (thinking on).",
     )
-    parser.add_argument("--lm-timeout", type=int, default=1800)
+    parser.add_argument("--lm-timeout", type=int, default=DEFAULT_TIMEOUT)
     parser.add_argument("--skip-connection-check", action="store_true")
     return parser.parse_args(argv)
 
@@ -671,6 +677,7 @@ def main(argv=None):
             out_tag=out_tag,
             reflection_lm=reflection_lm,
             output_dir=run_dir,
+            num_threads=args.num_threads,
         )
 
         # Evaluate
@@ -695,6 +702,7 @@ def main(argv=None):
             "n_test": args.n_test,
             "breadth": args.breadth,
             "depth": args.depth,
+            "num_threads": args.num_threads,
             "demos": 0 if args.no_demos else len(demos or []),
             "use_reference": use_reference,
             "generation_model": args.generation_model,

@@ -15,7 +15,7 @@
     "dtype": "bfloat16",
     "max_model_len": 131072,
     "mtp_num_speculative_tokens": 1,
-    "generation_max_tokens": 32768,
+    "generation_max_tokens": 65536,
     "verified_phase_e_input_tokens": 8905,
     "verified_hardware": "NVIDIA H200 NVL",
     "reasoning_parser": "qwen3",

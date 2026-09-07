@@ -96,9 +96,21 @@ def test_shipped_variants_are_shorter_than_phase_e_and_carry_all_domains():
 def test_before_demos_variant_keeps_the_original_instructions():
     loaded = AlgorithmGenerator()
     loaded.load(str(BASE_DIR / "prompts" / "compiled_program_v3_before_demos.json"))
-    original = AlgorithmGenerator().generate.predict.signature.instructions
-    assert loaded.generate.predict.signature.instructions == original
+    original = (BASE_DIR / "prompts" / "original_generate_instructions.md").read_text(
+        encoding="utf-8"
+    )
+    assert loaded.generate.predict.signature.instructions == original.strip()
     assert len(loaded.generate.predict.demos) == 2
+
+
+def test_default_generate_instruction_is_the_compact_one():
+    """What: the uncompiled AlgorithmGenerator now starts from the 1.8KB compact instruction."""
+    default = AlgorithmGenerator().generate.predict.signature.instructions
+    compact = AlgorithmGenerator()
+    compact.load(str(BASE_DIR / "prompts" / "compiled_program_v3_compact.json"))
+    assert default == compact.generate.predict.signature.instructions
+    assert len(default) < 2500
+    assert "Required Return Schema" in default
 
 
 def test_extra_program_adds_a_prompt_condition_for_dry_run(capsys, tmp_path):
