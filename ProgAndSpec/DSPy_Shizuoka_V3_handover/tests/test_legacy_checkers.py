@@ -148,3 +148,24 @@ def test_day1_routes_must_start_and_end_at_the_warehouse():
     }
     result = check_feasibility_detailed("配送・輸送_混合整数計画", instance, too_many)
     assert any("vehicles" in v for v in result["violations"])
+
+
+def test_parallel_machine_accepts_machine_to_jobs_mapping():
+    instance = {
+        "num_machines": 2,
+        "jobs": [
+            {"id": 1, "processing_time": 3},
+            {"id": 2, "processing_time": 4},
+            {"id": 3, "processing_time": 2},
+        ],
+    }
+    solution = {
+        "machine_assignment": {"0": [1, 3], "1": [2]},
+        "makespan": 5,
+        "machine_loads": [5, 4],
+    }
+    result = check_feasibility_detailed("スケジューリング_整数計画", instance, solution)
+    assert result["feasible"] is True, result["violations"]
+    wrong = {"machine_assignment": {"0": [1, 3], "1": [2]}, "makespan": 4}
+    result = check_feasibility_detailed("スケジューリング_整数計画", instance, wrong)
+    assert any("max machine load" in v for v in result["violations"])

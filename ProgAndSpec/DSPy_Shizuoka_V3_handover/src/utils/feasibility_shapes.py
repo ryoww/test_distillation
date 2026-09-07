@@ -28,10 +28,19 @@ def check_parallel_machine_assignment(instance: dict, solution: dict) -> dict | 
     assignment = _index_map(raw)
     if assignment is None:
         return _unverified("machine_assignment is not a job -> machine mapping")
-    violations: list[str] = []
     times = {
         job.get("id", i): _num(job.get("processing_time")) or 0.0 for i, job in enumerate(jobs)
     }
+    # Why not job -> machine だけ: 機械 -> [ジョブ id] で返す解も同じ割当を表す。値が全部
+    # リストなら転置して読む。機械番号は 0 始まりでも 1 始まりでもよい（下の判定に任せる）。
+    if assignment and all(isinstance(v, list) for v in assignment.values()):
+        transposed: dict[Any, Any] = {}
+        for machine, members in assignment.items():
+            for job_id in members:
+                key = job_id if job_id in times else _num(job_id)
+                transposed[key] = machine
+        assignment = transposed
+    violations: list[str] = []
     # Why not 1始まりに固定: instance は台数しか与えないので、0始まりで返す解も正当。
     # 全ジョブが 0..m-1 に収まるなら 0始まり、1..m に収まるなら 1始まりとして読む。
     values = [_num(v) for v in assignment.values()]

@@ -2234,7 +2234,11 @@ def check_lot_sizing_milp(instance: dict, solution: Any) -> dict:
     violations: list[str] = []
     demand = _num_list(instance.get("demand")) or []
     periods = int(_num(instance.get("periods")) or len(demand))
-    production = _num_list(_pick(solution, "production_plan", "plan", "production"))
+    # 期別の生産量は数値の配列でも、{period, production, ...} の配列でも読む。
+    production = _period_series(
+        _pick(solution, "production_plan", "plan", "production"),
+        ("production", "quantity", "qty", "amount", "produce"),
+    )
     if production is None:
         return _unverified("lot sizing without a production plan")
     if len(production) != periods:

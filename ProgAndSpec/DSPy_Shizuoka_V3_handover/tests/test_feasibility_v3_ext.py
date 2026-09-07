@@ -358,3 +358,27 @@ def test_production_plan_does_not_credit_holding_cost_for_a_shortfall():
     assert result["feasible"] is False
     assert result["cost"] is not None
     assert result["cost"] >= 0
+
+
+def test_lot_sizing_reads_a_plan_given_as_period_records():
+    instance = {
+        "periods": 3,
+        "demand": [10, 20, 30],
+        "setup_cost": 100,
+        "holding_cost": 1,
+        "unit_cost": 2,
+    }
+    as_numbers = {"min_cost": 340, "production_plan": [30.0, 0.0, 30.0], "note": ""}
+    as_records = {
+        "min_cost": 340,
+        "production_plan": [
+            {"period": 1, "production": 30, "setup": 1},
+            {"period": 2, "production": 0, "setup": 0},
+            {"period": 3, "production": 30, "setup": 1},
+        ],
+        "note": "",
+    }
+    for solution in (as_numbers, as_records):
+        result = check_feasibility_detailed("生産・在庫計画_混合整数計画", instance, solution)
+        assert result["verified"] is True
+        assert result["feasible"] is True, result["violations"]
