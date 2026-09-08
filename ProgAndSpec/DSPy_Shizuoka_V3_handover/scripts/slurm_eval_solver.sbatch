@@ -75,6 +75,15 @@ fi
 # ヘッダを持たないラッパーなので、ルートに入れた CUDA 13 toolkit を明示する（学習ジョブと同じ）。
 export CUDA_HOME="$ROOT_DIR/.runtime/cuda-13.0"
 export PATH="$CUDA_HOME/bin:$PATH"
+# Why not conda で libcurand-dev: cuda-13.0 の channel label に dev 版がなく解決できない。
+# Why not pip の include を丸ごと -I: 新しい runtime の crt/ が nvcc 13.0 の stub と食い違って壊れる。
+# torch が持ち込む pip の CUDA 13 ヘッダから curand*.h だけをリンクした dir を nvcc に足す。
+NVIDIA_INC="$(ls -d "$VLLM_ENV"/lib/python3*/site-packages/nvidia/cu13/include 2>/dev/null | head -1)"
+CURAND_INC="$CUDA_HOME/curand-include"
+if [[ -n "$NVIDIA_INC" && ! -f "$CURAND_INC/curand_kernel.h" ]]; then
+    mkdir -p "$CURAND_INC" && ln -sf "$NVIDIA_INC"/curand*.h "$CURAND_INC"/
+fi
+if [[ -f "$CURAND_INC/curand_kernel.h" ]]; then export NVCC_APPEND_FLAGS="${NVCC_APPEND_FLAGS:-} -I$CURAND_INC"; fi
 (
     cd "$ROOT_DIR"
     # Why --reasoning-parser: 思考を開くモデルの <think> を content から分離し、コード抽出を汚さない。
