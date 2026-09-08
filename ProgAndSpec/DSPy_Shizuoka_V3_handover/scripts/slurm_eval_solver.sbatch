@@ -17,6 +17,7 @@
 #   LABEL=base__agents_a1_4b sbatch --export=ALL scripts/slurm_eval_solver.sbatch
 #
 # DATA_DIRS はスペース区切りの問題ディレクトリ。既定は SFT のテスト集合と生成 140 問。
+# 汎化の測定: DATA_DIRS=data/problems EVAL_ARGS=--exclude-templated で出荷 100 問のうち雛形外の 72 問。
 set -euo pipefail
 
 : "${LABEL:?set LABEL, e.g. sft__agents_a1_4b}"
@@ -33,6 +34,8 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 # 同じ描画（enable_thinking=false）にする。素のモデルを思考ありで測るときだけ上書きする。
 EXTRA_BODY="${EXTRA_BODY:-{\"chat_template_kwargs\": {\"enable_thinking\": false}}}"
 CONCURRENCY="${CONCURRENCY:-8}"
+# 例: EVAL_ARGS=--exclude-templated で雛形化済みの問題を除き、汎化だけを測る。
+EVAL_ARGS="${EVAL_ARGS:-}"
 READY_TIMEOUT_SEC="${READY_TIMEOUT_SEC:-1500}"
 # 入力はおよそ 3k tokens。出力枠と合わせて context に収まらなければ全リクエストが 400 になる。
 if (( MAX_TOKENS + 4096 > MAX_MODEL_LEN )); then
@@ -83,7 +86,7 @@ for data_dir in $DATA_DIRS; do
         --label "$LABEL" \
         --run-name "$RUN_NAME-$tag" \
         --max-tokens "$MAX_TOKENS" --extra-body "$EXTRA_BODY" \
-        --concurrency "$CONCURRENCY" 2>&1 | tee "$LOG_DIR/eval-$tag.log" || status=$?
+        --concurrency "$CONCURRENCY" $EVAL_ARGS 2>&1 | tee "$LOG_DIR/eval-$tag.log" || status=$?
 done
 echo "[$(date +%T)] done (status=$status)"
 exit "$status"

@@ -548,8 +548,11 @@ MODEL_PATH=../../outputs/<run>/merged LABEL=sft__agents_a1_4b sbatch --export=AL
   `<think>\n` を開いたまま渡すので、学習で見ていない状態から思考を始めて出力枠を使い切ります。
   評価ジョブの既定はこの設定です。素のモデルを思考ありで測るときだけ `EXTRA_BODY='{}'` で上書きし、
   そのときは `MAX_MODEL_LEN` を `MAX_TOKENS` + 4096 以上にします（足りなければジョブが先に止まります）。
+- **汎化の測定**は `DATA_DIRS=data/problems EVAL_ARGS=--exclude-templated` で行います。出荷 100 問から
+  雛形化済みの 28 問を除いた 72 問だけを解かせます（`--exclude-templated` は `src.datagen.TEMPLATES`
+  の問題番号を除きます）。SFT 後のモデルはこの 72 問で素のモデルより悪化します（`RESCORE_REPORT.md` 20 章）。
 
-## 9. 既知の限界
+## 10. 既知の限界
 
 - 95問は数値目的を選択できますが、5問は数値目的がありません。
 - 旧チェッカー（feasibility.py 直登録の8 core_type）は `jobs` や `customers` キーのない
@@ -567,6 +570,9 @@ MODEL_PATH=../../outputs/<run>/merged LABEL=sft__agents_a1_4b sbatch --export=AL
 - 既定のbreadth 6 / depth 8は長時間実行です。接続確認では小さい値を使います。
 - Phase E の指示文の優位は採点系の欠陥への適応で、修正後は初期指示文や compact と区別できません
   （`RESCORE_REPORT.md` 16 章）。GEPA を再学習する前に、採点系が直っていることを確認してください。
+- 特化 SFT した 4B（`RESCORE_REPORT.md` 19 章）は学習した 28 雛形の外では素の 4B を下回ります
+  （雛形外 70 問で 0.602 → 0.430、20 章）。汎用 solver としては使えず、雛形を増やす以外に
+  対象範囲を広げる方法はありません。
 - 修正済み採点系で再学習した GEPA（17 章）は Qwen3.8 で有意に効きますが、検証 13 問は満点で
   飽和し、学んだ規則は見た雛形に固有です。見ていない問題種別への汎化は測れていません。
 - Qwen3.8 は思考が `max_tokens` 32,768 を使い切って本文が空になる問題が 140 問中 21〜35 問

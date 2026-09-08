@@ -48,6 +48,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--limit", type=int, help="先頭 N 問だけ（動作確認用）")
     parser.add_argument(
+        "--exclude-templated",
+        action="store_true",
+        help="雛形化済み（SFT の教師データに含まれる種別）の問題を除く。汎化の測定用",
+    )
+    parser.add_argument(
         "--extra-body", default="{}", help="chat completions に足す JSON（例: thinking の無効化）"
     )
     return parser.parse_args()
@@ -177,6 +182,12 @@ def main() -> int:
         example["record"] = record
         examples.append(example)
     examples.sort(key=lambda e: e["instance_id"])
+    if args.exclude_templated:
+        from src.datagen import TEMPLATES
+
+        templated = {f"prob_{k:03d}" for k in TEMPLATES}
+        examples = [ex for ex in examples if ex["instance_id"] not in templated]
+        print(f"excluded templated problems; {len(examples)} remain", file=sys.stderr)
     if args.limit:
         examples = examples[: args.limit]
     instruction = AlgorithmGenerator().generate.predict.signature.instructions
