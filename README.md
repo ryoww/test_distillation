@@ -131,6 +131,31 @@ pilot の結果を確認後、`--max-train-samples` を外し、必要なら
 概算5時間半〜6時間です。ベンチマークは
 `outputs/agents-a1-4b-fullft-benchmark-10steps/` に保存されています。
 
+## 4b. ローカル JSONL からの特化学習と adapter の焼き込み
+
+`--dataset-dir` を渡すと、Hugging Face のデータセットの代わりにローカルの
+`train.jsonl` / `validation.jsonl`（1 行 1 例、`messages` と任意の `tools`）を読みます。
+`ProgAndSpec/DSPy_Shizuoka_V3_handover/scripts/build_sft_dataset.py` が作る最適化問題の
+solver データはこの形式です。
+
+```bash
+CUDA_VISIBLE_DEVICES=0 .runtime/train/bin/python scripts/train_distillation.py \
+  --dataset-dir ProgAndSpec/DSPy_Shizuoka_V3_handover/data/sft \
+  --run-name solver-agents-a1-4b-lora \
+  --max-length 6144 --lora-r 32 --lora-alpha 64 --learning-rate 1e-4 \
+  --num-train-epochs 3 --gradient-accumulation-steps 8
+```
+
+学習した adapter は `scripts/merge_adapter.py` でベースに焼き込み、通常のモデルとして
+vLLM に渡せます。vLLM の LoRA 配信は対象モジュールに制約があるため、linear attention を
+含む adapter はマージして配信します。
+
+```bash
+.runtime/train/bin/python scripts/merge_adapter.py \
+  --adapter outputs/solver-agents-a1-4b-lora/adapter \
+  --output outputs/solver-agents-a1-4b-lora/merged
+```
+
 ## 5. vLLM で adapter を配信
 
 `~/test_DSPy` と同じく、vLLM は学習環境と分離した venv で動かします。

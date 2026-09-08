@@ -63,6 +63,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", default=DEFAULT_DATASET)
     parser.add_argument("--dataset-revision", default=DATASET_REVISION)
     parser.add_argument("--dataset-config", default="sft_final")
+    parser.add_argument(
+        "--dataset-dir",
+        type=Path,
+        help="Local directory with train.jsonl and validation.jsonl (messages format); "
+        "overrides --dataset.",
+    )
     parser.add_argument("--run-name")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--resume-from-checkpoint", type=Path)
@@ -131,6 +137,21 @@ def load_model(args: argparse.Namespace, quantization: BitsAndBytesConfig | None
     )
 
 
+def load_training_dataset(args: argparse.Namespace):
+    """Hub のデータセットか、ローカルの train/validation JSONL を読む。
+
+    ローカル JSONL は 1 行 1 例で、`messages`（role/content の配列）と任意の `tools` を持つ。
+    Hub 側と同じ列名なので、以降の前処理は共通になる。
+    """
+    if args.dataset_dir is None:
+        return load_dataset(args.dataset, args.dataset_config, revision=args.dataset_revision)
+    files = {split: str(args.dataset_dir / f"{split}.jsonl") for split in ("train", "validation")}
+    missing = [path for path in files.values() if not Path(path).is_file()]
+    if missing:
+        raise FileNotFoundError(f"dataset files not found: {missing}")
+    return load_dataset("json", data_files=files)
+
+
 def prepare_split(
     split: Dataset,
     tokenizer: Any,
@@ -187,11 +208,7 @@ def main() -> None:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    dataset = load_dataset(
-        args.dataset,
-        args.dataset_config,
-        revision=args.dataset_revision,
-    )
+    dataset = load_training_dataset(args)
     train, train_stats = prepare_split(
         dataset["train"],
         tokenizer,
@@ -299,7 +316,11 @@ def main() -> None:
         json.dumps(config, indent=2, default=str) + "\n",
         encoding="utf-8",
     )
-    trainer.train(resume_from_checkpoint=str(args.resume_from_checkpoint) if args.resume_from_checkpoint else None)
+    trainer.train(
+        resume_from_checkpoint=str(args.resume_from_checkpoint)
+        if args.resume_from_checkpoint
+        else None
+    )
     adapter_dir = run_dir / "adapter"
     trainer.model.save_pretrained(adapter_dir)
     tokenizer.save_pretrained(adapter_dir)
