@@ -20,7 +20,7 @@ from project_paths import configure_storage
 configure_storage()
 
 import torch
-from huggingface_hub import snapshot_download
+from huggingface_hub import try_to_load_from_cache
 from peft import PeftModel
 from transformers import (
     AutoConfig,
@@ -59,18 +59,19 @@ def main() -> None:
     AutoTokenizer.from_pretrained(str(args.adapter)).save_pretrained(args.output)
     # 前処理設定やチャットテンプレートはベースのスナップショットから引き継ぐ。
     # save_pretrained は重みと config しか書かないので、無いと vLLM が起動時に見失う。
-    source = Path(
-        snapshot_download(args.model, revision=args.model_revision, local_files_only=True)
-    )
+    # Why not snapshot_download: スナップショットに README 等の未取得ファイルがあると
+    # local_files_only では丸ごと失敗する。要るファイルだけをキャッシュから個別に探す。
     for name in (
         "generation_config.json",
         "preprocessor_config.json",
+        "processor_config.json",
         "video_preprocessor_config.json",
         "chat_template.json",
         "chat_template.jinja",
     ):
-        if (source / name).is_file() and not (args.output / name).is_file():
-            (args.output / name).write_bytes((source / name).read_bytes())
+        cached = try_to_load_from_cache(args.model, name, revision=args.model_revision)
+        if isinstance(cached, str) and not (args.output / name).is_file():
+            (args.output / name).write_bytes(Path(cached).read_bytes())
     print(f"merged model saved to {args.output}")
 
 
