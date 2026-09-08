@@ -120,7 +120,7 @@
 
 \subsection{プロンプト最適化（GEPA）の再評価}
 
-修正済み採点系で，指示文の6条件をQwen3.6-27B / Qwen3.8-27Bで測った（表\ref{tab:prompt}，図\ref{fig:score}）．beforeは初期指示文，Phase Eは引き継いだGEPA学習済み指示文，compactは初期指示文を共通原則に圧縮した1.8KBの版，modularはcompactに分野別の補足を実行時に足す版，再学習GEPAはcompactを初期値に修正済み採点系で学習し直した版である．
+修正済み採点系で，指示文の6条件をQwen3.6-27B / Qwen3.8-27Bで測った（表\ref{tab:prompt}，図\ref{fig:score}）．beforeは初期指示文，Phase Eは引き継いだGEPA学習済み指示文，compactは初期指示文を共通原則に圧縮した1.8KBの版，modularはcompactに分野別の補足を実行時に足す版，再学習GEPAはcompactを初期値に修正済み採点系で学習し直した版である．表中のdemoは，指示文の後に付けるfew-shot例2件を指す．Phase Eの学習時にGEPAが訓練問題から採用した，単一機械ジョブ順序決定（動的計画法，prob\_001）と基本VRP（混合整数計画，prob\_021）の2問について，問題文とその正解コード（1.6KBと9.0KB）を入出力例として与えるもので，before以外の5条件はすべて同じ2件を共有する．before + demoは，このdemoだけの効果を指示文の効果から切り分けるための対照条件である．
 
 \begin{table}[H]
   \centering
