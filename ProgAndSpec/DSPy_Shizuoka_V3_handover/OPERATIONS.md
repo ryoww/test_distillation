@@ -546,7 +546,8 @@ MODEL_PATH=../../outputs/<run>/merged LABEL=sft__agents_a1_4b sbatch --export=AL
 - **推論時は `enable_thinking: false` を渡します。** Qwen3 系のテンプレートは学習データの assistant
   冒頭に空の思考ブロック `<think>\n\n</think>\n\n` を描画します。既定のテンプレートで推論すると
   `<think>\n` を開いたまま渡すので、学習で見ていない状態から思考を始めて出力枠を使い切ります。
-  評価ジョブでは `EXTRA_BODY='{"chat_template_kwargs": {"enable_thinking": false}}'` です。
+  評価ジョブの既定はこの設定です。素のモデルを思考ありで測るときだけ `EXTRA_BODY='{}'` で上書きし、
+  そのときは `MAX_MODEL_LEN` を `MAX_TOKENS` + 4096 以上にします（足りなければジョブが先に止まります）。
 
 ## 9. 既知の限界
 

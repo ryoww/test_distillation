@@ -29,10 +29,16 @@ DATA_DIRS="${DATA_DIRS:-data/sft/problems_test data/problems_generated}"
 MAX_TOKENS="${MAX_TOKENS:-6144}"
 # 入力（約 3k tokens）と MAX_TOKENS の合計が収まる長さにする。
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
-# 例: EXTRA_BODY='{"chat_template_kwargs": {"enable_thinking": false}}' で思考を切る。
-EXTRA_BODY="${EXTRA_BODY:-{\}}"
+# Why not 思考あり: SFT データの assistant 冒頭は空の思考ブロックで描画されているので、推論も
+# 同じ描画（enable_thinking=false）にする。素のモデルを思考ありで測るときだけ上書きする。
+EXTRA_BODY="${EXTRA_BODY:-{\"chat_template_kwargs\": {\"enable_thinking\": false}}}"
 CONCURRENCY="${CONCURRENCY:-8}"
 READY_TIMEOUT_SEC="${READY_TIMEOUT_SEC:-1500}"
+# 入力はおよそ 3k tokens。出力枠と合わせて context に収まらなければ全リクエストが 400 になる。
+if (( MAX_TOKENS + 4096 > MAX_MODEL_LEN )); then
+    echo "MAX_TOKENS=$MAX_TOKENS + prompt does not fit MAX_MODEL_LEN=$MAX_MODEL_LEN; raise MAX_MODEL_LEN" >&2
+    exit 2
+fi
 PORT=$((7700 + SLURM_JOB_ID % 100))
 SERVED="agents-a1-4b-solver"
 LOG_DIR="$HANDOVER_DIR/outputs/slurm/$RUN_NAME-$LABEL"

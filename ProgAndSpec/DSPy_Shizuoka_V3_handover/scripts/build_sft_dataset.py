@@ -154,9 +154,9 @@ def collect_candidates(codes_per_template: int) -> dict[int, list[dict]]:
     return selected
 
 
-def _verify(args: tuple[dict, dict]) -> tuple[str, str, dict]:
+def _verify(args: tuple[dict, dict, float]) -> tuple[str, str, dict]:
     """1 対を採点する。子プロセスで動くので引数と戻り値は素の dict にする。"""
-    example, candidate = args
+    example, candidate, timeout = args
     registry = _best_known.BestKnownRegistry()
     if example.get("reference_value") is not None:
         registry.register(example["instance_id"], example["reference_value"])
@@ -166,7 +166,7 @@ def _verify(args: tuple[dict, dict]) -> tuple[str, str, dict]:
         core_type=example["core_type"],
         instance_id=example["instance_id"],
         registry=registry,
-        timeout=60.0,
+        timeout=timeout,
         reference_value=example.get("reference_value"),
         reference_solution=example.get("reference_solution", {}),
         objective_text=example.get("objective", ""),
@@ -216,7 +216,7 @@ def fresh_split(
 
 
 def build_pairs(
-    records: list[dict], selected: dict[int, list[dict]], workers: int
+    records: list[dict], selected: dict[int, list[dict]], workers: int, timeout: float = 60.0
 ) -> tuple[list[dict], Counter]:
     """全 (instance, 候補コード) 対を採点し、exact_match の対だけを返す。"""
     examples = {f"prob_{r['id']}": convert_to_dspy_example(r, use_reference=True) for r in records}
@@ -224,7 +224,7 @@ def build_pairs(
     jobs = []
     for instance_id, example in examples.items():
         for candidate in selected.get(template_of[instance_id], []):
-            jobs.append((example, candidate))
+            jobs.append((example, candidate, timeout))
     counts: Counter = Counter()
     kept: list[dict] = []
     with ProcessPoolExecutor(max_workers=workers) as pool:
@@ -278,7 +278,7 @@ def main() -> None:
     ):
         records = fresh_split(name, seed, per_template, template_ids, start, out)
         by_id = {r["id"]: r for r in records}
-        kept, counts = build_pairs(records, selected, args.workers)
+        kept, counts = build_pairs(records, selected, args.workers, args.timeout)
         rows = [
             to_messages(by_id[int(k["instance_id"].split("_")[1])], k["code"], instruction)
             for k in kept

@@ -10,6 +10,7 @@ compare_prompt_models.py の子評価と同じ shard 形式で書くので、res
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import sys
 import time
@@ -95,7 +96,28 @@ def solve_one(args: argparse.Namespace, instruction: str, example: dict) -> dict
             args.timeout,
             json.loads(args.extra_body),
         )
-    except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError) as exc:
+    except urllib.error.HTTPError as exc:
+        if 400 <= exc.code < 500:
+            # Why not gen_error として記録: 4xx は設定ミス（context 超過、モデル名違い）で、
+            # 140 問ぶん同じ失敗を保存しても意味がない。すぐ止めて直させる。
+            raise RuntimeError(f"HTTP {exc.code} from the server: {exc.read()[:300]!r}") from exc
+        return {
+            "instance_id": example["instance_id"],
+            "code": None,
+            "status": "gen_error",
+            "score": -0.5,
+            "detail": f"request failed: {exc}",
+            "elapsed": time.monotonic() - started,
+        }
+    except (
+        urllib.error.URLError,
+        OSError,
+        http.client.HTTPException,
+        TimeoutError,
+        KeyError,
+        IndexError,
+        json.JSONDecodeError,
+    ) as exc:
         return {
             "instance_id": example["instance_id"],
             "code": None,
@@ -168,7 +190,12 @@ def main() -> int:
             pool.submit(solve_one, args, instruction, ex): ex["instance_id"] for ex in examples
         }
         for index, future in enumerate(as_completed(futures), start=1):
-            row = future.result()
+            try:
+                row = future.result()
+            except RuntimeError as exc:
+                print(f"aborting: {exc}", file=sys.stderr)
+                pool.shutdown(cancel_futures=True)
+                return 2
             rows.append(row)
             print(
                 f"[{index}/{len(examples)}] {row['instance_id']}: {row['status']} score={row['score']:.2f} ({row.get('elapsed', 0):.0f}s)",
