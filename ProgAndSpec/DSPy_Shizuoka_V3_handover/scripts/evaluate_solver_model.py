@@ -48,6 +48,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--limit", type=int, help="先頭 N 問だけ（動作確認用）")
     parser.add_argument(
+        "--system-prefix-file",
+        type=Path,
+        help="system 指示文の前に置くテキスト（例: Ministral Reasoning が思考を開くための推奨 system prompt）",
+    )
+    parser.add_argument(
         "--exclude-templated",
         action="store_true",
         help="雛形化済み（SFT の教師データに含まれる種別）の問題を除く。汎化の測定用",
@@ -191,6 +196,10 @@ def main() -> int:
     if args.limit:
         examples = examples[: args.limit]
     instruction = AlgorithmGenerator().generate.predict.signature.instructions
+    if args.system_prefix_file:
+        # Why: Ministral 3 Reasoning は system が無いときだけ思考用の既定 system を差し込む。
+        # 我々の指示文を system に置くとそれが消えるので、推奨文を前置して思考の条件を保つ。
+        instruction = args.system_prefix_file.read_text().strip() + "\n\n" + instruction
     # Why not 環境変数 ROLE: 出力は compare の shard 形式に揃え、rescore と集計を共通にする。
     shard_dir = args.output_dir / args.run_name / f"{args.label}__shard01of01"
     shard_dir.mkdir(parents=True, exist_ok=True)

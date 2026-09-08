@@ -167,6 +167,8 @@ vLLM/llama.cpp/Ollama の運用手順（バージョン選定、起動、疎通�
 
 ```bash
 uv run scripts/bootstrap_vllm_env.py
+# 新しいアーキテクチャ（Gemma 4 12B など）を配信するときは別ディレクトリに新版を作る
+uv run scripts/bootstrap_vllm_env.py --env-dir .runtime/vllm-0.28 --vllm-version 0.28.0
 
 CUDA_VISIBLE_DEVICES=0 uv run scripts/serve_vllm.py \
   --adapter-path outputs/agents-a1-4b-sft-final-pilot/adapter \
