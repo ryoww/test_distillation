@@ -46,7 +46,10 @@ MAX_TOKENS="${MAX_TOKENS:-6144}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 # Why not 思考あり: SFT データの assistant 冒頭は空の思考ブロックで描画されているので、推論も
 # 同じ描画（enable_thinking=false）にする。素のモデルを思考ありで測るときだけ上書きする。
-EXTRA_BODY="${EXTRA_BODY:-{\"chat_template_kwargs\": {\"enable_thinking\": false}}}"
+# Why not 既定値を ${VAR:-...} に直書き: 波括弧を含む既定値は bash の展開が乱れ、値を渡したときに
+# 余分な "}}" が付いて JSON が壊れる。既定は別変数に置く。
+DEFAULT_EXTRA_BODY='{"chat_template_kwargs": {"enable_thinking": false}}'
+EXTRA_BODY="${EXTRA_BODY:-$DEFAULT_EXTRA_BODY}"
 CONCURRENCY="${CONCURRENCY:-8}"
 # 例: EVAL_ARGS=--exclude-templated で雛形化済みの問題を除き、汎化だけを測る。
 EVAL_ARGS="${EVAL_ARGS:-}"
