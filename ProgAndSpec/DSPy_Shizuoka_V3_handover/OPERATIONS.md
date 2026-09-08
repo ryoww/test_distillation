@@ -599,6 +599,10 @@ LABEL=ministral3_14b_reasoning MODEL_PATH=mistralai/Ministral-3-14B-Reasoning-25
 - 既定のbreadth 6 / depth 8は長時間実行です。接続確認では小さい値を使います。
 - Phase E の指示文の優位は採点系の欠陥への適応で、修正後は初期指示文や compact と区別できません
   （`RESCORE_REPORT.md` 16 章）。GEPA を再学習する前に、採点系が直っていることを確認してください。
+- 4B・12B とも思考モードはこの課題で収束しません。素の 4B は 64k 枠で 140 問中 115 問、Gemma 4 12B は
+  139 問が枠切れです（`RESCORE_REPORT.md` 15・21 章）。思考なしで測り、SFT も思考なしの描画で行ってください。
+- Slurm 外で GPU を直接使うときは、配信の停止で EngineCore が残らないか `nvidia-smi` で確認してください。
+  ジョブはプロセスグループごと止めますが、手で kill した場合は残ることがあります。
 - 特化 SFT した 4B（`RESCORE_REPORT.md` 19 章）は学習した 28 雛形の外では素の 4B を下回ります
   （雛形外 70 問で 0.602 → 0.430、20 章）。汎用 solver としては使えず、雛形を増やす以外に
   対象範囲を広げる方法はありません。
