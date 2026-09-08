@@ -88,14 +88,27 @@ if [[ -f "$CURAND_INC/curand_kernel.h" ]]; then export NVCC_APPEND_FLAGS="${NVCC
 [[ -e "$CUDA_HOME/lib64" ]] || ln -s lib "$CUDA_HOME/lib64"
 (
     cd "$ROOT_DIR"
+    # Why setsid: vLLM は EngineCore を子プロセスとして起こす。親だけ kill すると EngineCore が
+    # GPU メモリを握ったまま残るので、独立したプロセスグループにしてグループごと止める。
     # Why --reasoning-parser: 思考を開くモデルの <think> を content から分離し、コード抽出を汚さない。
-    uv run scripts/serve_vllm.py "${SERVE_ARGS[@]}" --max-num-seqs 16 --disable-log-stats --disable-uvicorn-access-log --reasoning-parser "$REASONING_PARSER" $VLLM_EXTRA_ARGS
+    exec setsid uv run scripts/serve_vllm.py "${SERVE_ARGS[@]}" --max-num-seqs 16 --disable-log-stats --disable-uvicorn-access-log --reasoning-parser "$REASONING_PARSER" $VLLM_EXTRA_ARGS
 ) > "$LOG_DIR/vllm_$PORT.log" 2>&1 &
 SERVER_PID=$!
-trap 'echo "[$(date +%T)] stopping server"; kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true' EXIT
+stop_server() {
+    echo "[$(date +%T)] stopping server group $SERVER_PID"
+    kill -TERM -- "-$SERVER_PID" 2>/dev/null || kill -TERM "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+    sleep 3
+    kill -KILL -- "-$SERVER_PID" 2>/dev/null || true
+}
+trap stop_server EXIT
 
 waited=0
 until curl -sf -H "Authorization: Bearer local" "http://127.0.0.1:$PORT/v1/models" > /dev/null; do
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "[$(date +%T)] server process exited before becoming ready; see $LOG_DIR/vllm_$PORT.log" >&2
+        exit 1
+    fi
     if (( waited >= READY_TIMEOUT_SEC )); then
         echo "[$(date +%T)] server on port $PORT did not come up within ${READY_TIMEOUT_SEC}s" >&2
         exit 1
