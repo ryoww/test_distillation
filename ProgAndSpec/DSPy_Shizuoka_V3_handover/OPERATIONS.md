@@ -520,6 +520,30 @@ DSPy は `~/.dspy_cache` に応答をキャッシュします。temperature 0 �
 中断したジョブで生成済みの問題はキャッシュから即座に返るので、再投入しても生成し直しには
 なりません。条件を変えずに独立した再実行が必要なときはキャッシュを退避してください。
 
+## 9. この問題集に特化した小型 solver の SFT
+
+Fable と Qwen の正解コードを教師にして、Agents-A1-4B をこの問題集専用の solver に学習します。
+データは「新しい instance で実際に正解したコード」だけなので、特定 instance に依存した
+コードは自然に落ちます。
+
+```bash
+uv run python scripts/build_sft_dataset.py            # data/sft/{train,validation,test}.jsonl と問題集
+sbatch scripts/slurm_train_solver.sbatch              # ルートの .runtime/train で LoRA 学習
+# 学習後、ルートで adapter を焼き込む
+(cd ../.. && .runtime/train/bin/python scripts/merge_adapter.py \
+  --adapter outputs/<run>/adapter --output outputs/<run>/merged)
+export QWEN_VLLM_ENV=/home/yy-lab/test_DSPy/.runtime/vllm/vllm-cu13
+LABEL=base__agents_a1_4b sbatch --export=ALL scripts/slurm_eval_solver.sbatch
+MODEL_PATH=../../outputs/<run>/merged LABEL=sft__agents_a1_4b sbatch --export=ALL scripts/slurm_eval_solver.sbatch
+```
+
+- 学習・検証・テストの instance は seed を分けて生成します（既定 90001 / 90002 / 90003、雛形ごとに
+  40 / 4 / 5 問）。テスト集合 `data/sft/problems_test` と生成 140 問の両方で評価します。
+- 入力は system = 既定の指示文（compact）、user = 参照値を含まない requirement です。学習時も
+  評価時も同じ形式で、`scripts/evaluate_solver_model.py` が DSPy を通さず直接 API を叩きます。
+- 評価結果は compare の shard 形式で `outputs/prompt_model_comparisons/<run>/` に出るので、
+  `rescore_with_checkers.py` と同じ集計が使えます。
+
 ## 9. 既知の限界
 
 - 95問は数値目的を選択できますが、5問は数値目的がありません。
