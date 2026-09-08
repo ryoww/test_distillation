@@ -382,3 +382,25 @@ def test_lot_sizing_reads_a_plan_given_as_period_records():
         result = check_feasibility_detailed("生産・在庫計画_混合整数計画", instance, solution)
         assert result["verified"] is True
         assert result["feasible"] is True, result["violations"]
+
+
+def test_bins_accept_name_suffixed_keys():
+    record = _problem(59)
+    reference = record["reference_solution"]
+    bins = {f"bin_{int(key) + 1}": members for key, members in reference["bins"].items()}
+    result = _check(record, {"min_bins": reference["min_bins"], "bins": bins})
+    assert result["verified"] is True
+    assert result["feasible"] is True, result["violations"]
+
+
+def test_shipments_accept_flat_plant_to_customer_keys():
+    record = _problem(94)
+    reference = record["reference_solution"]
+    flat = {
+        f"plant_{plant}_to_customer_{customer}": qty
+        for plant, row in reference["shipments"].items()
+        for customer, qty in row.items()
+    }
+    result = _check(record, {"min_total_cost": reference["min_total_cost"], "shipments": flat})
+    assert result["verified"] is True
+    assert result["feasible"] is True, result["violations"]

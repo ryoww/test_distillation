@@ -29,6 +29,7 @@ EXTRA_CHECKERS を feasibility.py 側が読み込んで登録する。
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Callable, Iterable, Sequence
 from itertools import pairwise
 from typing import Any
@@ -213,11 +214,19 @@ def _period_series(value: Any, field_names: Sequence[str]) -> list[float] | None
 
 
 def _index_map(value: Any) -> dict[int, Any] | None:
-    """{"0": x, "1": y} 形式や [x, y] 形式を dict[int, Any] へ正規化する。"""
+    """{"0": x, "1": y} 形式や [x, y] 形式を dict[int, Any] へ正規化する。
+
+    ``{"bin_1": [...], "machine_2": [...]}`` のように名前の末尾に番号を付けた鍵も受ける。
+    """
     if isinstance(value, dict):
         out: dict[int, Any] = {}
         for key, item in value.items():
             idx = _num(key)
+            if idx is None and isinstance(key, str):
+                # 番号が 1 つだけ末尾に付く名前に限る。"plant_0_to_customer_3" のような
+                # 2 番号の鍵は行列の平坦化なので、ここでは扱わない。
+                match = re.fullmatch(r"[^\d]*(\d+)\s*", key)
+                idx = int(match.group(1)) if match else None
             if idx is None or not float(idx).is_integer():
                 return None
             out[int(idx)] = item
@@ -225,6 +234,18 @@ def _index_map(value: Any) -> dict[int, Any] | None:
     if isinstance(value, (list, tuple)):
         return dict(enumerate(value))
     return None
+
+
+def _pair_keyed(value: Any) -> bool:
+    """鍵に番号がちょうど 2 つ入った数値 dict か（行列を平坦化した形）。"""
+    return (
+        isinstance(value, dict)
+        and bool(value)
+        and all(
+            isinstance(k, str) and len(re.findall(r"\d+", k)) == 2 and _num(v) is not None
+            for k, v in value.items()
+        )
+    )
 
 
 def _count_map(value: Any) -> dict[int, float] | None:
@@ -1873,6 +1894,11 @@ def check_composite_lp(instance: dict, solution: Any) -> dict:
                     flows.setdefault(int(plant), {})[int(customer)] = amount
             else:
                 return _unverified("shipment entries are not plant/customer records")
+        elif _pair_keyed(raw):
+            # {"plant_0_to_customer_3": 12} のように工場と顧客の番号を鍵に埋めた平坦な dict。
+            for key, qty in raw.items():
+                plant, customer = (int(n) for n in re.findall(r"\d+", key))
+                flows.setdefault(plant, {})[customer] = _num(qty) or 0.0
         else:
             outer = _index_map(raw)
             if outer is None:
