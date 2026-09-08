@@ -146,6 +146,10 @@ CUDA_VISIBLE_DEVICES=0 .runtime/train/bin/python scripts/train_distillation.py \
   --num-train-epochs 3 --gradient-accumulation-steps 8
 ```
 
+`--model` / `--model-revision` で土台を差し替えられます。Gemma 4 のように `enable_thinking`
+で描画が変わる chat template は、推論側の `chat_template_kwargs` と同じ JSON を
+`--chat-template-kwargs '{"enable_thinking": true}'` で渡し、学習と推論の prompt を一致させます。
+
 学習した adapter は `scripts/merge_adapter.py` でベースに焼き込み、通常のモデルとして
 vLLM に渡せます。vLLM の LoRA 配信は対象モジュールに制約があるため、linear attention を
 含む adapter はマージして配信します。

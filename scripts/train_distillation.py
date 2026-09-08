@@ -75,6 +75,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-length", type=int, default=4096)
     parser.add_argument("--max-train-samples", type=int)
     parser.add_argument("--max-eval-samples", type=int, default=256)
+    parser.add_argument(
+        "--chat-template-kwargs",
+        default=None,
+        help='chat template に渡す追加引数の JSON（例: \'{"enable_thinking": true}\'）',
+    )
     parser.add_argument("--include-tools", action="store_true")
     parser.add_argument("--load-in-4bit", action="store_true")
     parser.add_argument(
@@ -158,6 +163,7 @@ def prepare_split(
     max_length: int,
     include_tools: bool,
     max_samples: int | None,
+    template_kwargs: dict[str, Any] | None = None,
 ) -> tuple[Dataset, dict[str, int]]:
     if max_samples is not None:
         split = split.select(range(min(max_samples, len(split))))
@@ -174,7 +180,7 @@ def prepare_split(
                 "valid": False,
                 "invalid_reason": "tools_disabled",
             }
-        result = encode_example(row, tokenizer, max_length)
+        result = encode_example(row, tokenizer, max_length, template_kwargs=template_kwargs)
         counts["valid" if result["valid"] else result["invalid_reason"].split(":")[0]] += 1
         return result
 
@@ -209,12 +215,16 @@ def main() -> None:
         tokenizer.pad_token = tokenizer.eos_token
 
     dataset = load_training_dataset(args)
+    # Why: Gemma 4 のように enable_thinking で描画が変わるテンプレートは、学習と推論で同じ値を
+    # 渡さないと assistant 直前の列が食い違う。推論側の chat_template_kwargs と同じ JSON を受ける。
+    template_kwargs = json.loads(args.chat_template_kwargs) if args.chat_template_kwargs else None
     train, train_stats = prepare_split(
         dataset["train"],
         tokenizer,
         args.max_length,
         args.include_tools,
         args.max_train_samples,
+        template_kwargs,
     )
     evaluation, eval_stats = prepare_split(
         dataset["validation"],
@@ -222,6 +232,7 @@ def main() -> None:
         args.max_length,
         args.include_tools,
         args.max_eval_samples,
+        template_kwargs,
     )
     (run_dir / "dataset_stats.json").write_text(
         json.dumps(

@@ -28,3 +28,31 @@ def test_structural_redaction_labels_only_trainable_assistant() -> None:
     assert encoded["mask_method"] == "structural-redaction"
     assert "answer" in supervised
     assert "question" not in supervised
+
+
+class KwargTokenizer:
+    """template_kwargs がそのまま chat template に届くことを観測する。"""
+
+    def __init__(self) -> None:
+        self.seen: list[dict] = []
+
+    def apply_chat_template(self, messages, **kwargs):
+        self.seen.append(kwargs)
+        marker = "<think>" if kwargs.get("enable_thinking") else ""
+        rendered = marker + "".join(f"<{item['role']}>{item['content']}" for item in messages)
+        return [ord(character) for character in rendered]
+
+
+def test_template_kwargs_reach_every_render() -> None:
+    row = {
+        "messages": [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a"},
+        ],
+        "tools": [],
+    }
+    tokenizer = KwargTokenizer()
+    encoded = encode_example(row, tokenizer, max_length=100, template_kwargs={"enable_thinking": True})
+    assert encoded["valid"]
+    assert all(call["enable_thinking"] is True for call in tokenizer.seen)
+    assert "".join(chr(token) for token in encoded["input_ids"]).startswith("<think>")
