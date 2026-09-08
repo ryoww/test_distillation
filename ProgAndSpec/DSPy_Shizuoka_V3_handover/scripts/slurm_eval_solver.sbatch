@@ -27,6 +27,10 @@ ROOT_DIR="$(cd "$HANDOVER_DIR/../.." && pwd)"
 RUN_NAME="${RUN_NAME:-solver-eval-$(date +%Y%m%d)}"
 DATA_DIRS="${DATA_DIRS:-data/sft/problems_test data/problems_generated}"
 MAX_TOKENS="${MAX_TOKENS:-6144}"
+# 入力（約 3k tokens）と MAX_TOKENS の合計が収まる長さにする。
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
+# 例: EXTRA_BODY='{"chat_template_kwargs": {"enable_thinking": false}}' で思考を切る。
+EXTRA_BODY="${EXTRA_BODY:-{\}}"
 CONCURRENCY="${CONCURRENCY:-8}"
 READY_TIMEOUT_SEC="${READY_TIMEOUT_SEC:-1500}"
 PORT=$((7700 + SLURM_JOB_ID % 100))
@@ -35,16 +39,17 @@ LOG_DIR="$HANDOVER_DIR/outputs/slurm/$RUN_NAME-$LABEL"
 mkdir -p "$LOG_DIR"
 
 echo "[$(date +%T)] job $SLURM_JOB_ID on $(hostname); GPU: ${CUDA_VISIBLE_DEVICES:-unset}; port $PORT"
-echo "[$(date +%T)] label=$LABEL model=${MODEL_PATH:-base} data=[$DATA_DIRS] max_tokens=$MAX_TOKENS"
+echo "[$(date +%T)] label=$LABEL model=${MODEL_PATH:-base} data=[$DATA_DIRS] max_tokens=$MAX_TOKENS extra_body=$EXTRA_BODY"
 
-SERVE_ARGS=(--vllm-env-dir "$QWEN_VLLM_ENV" --served-model-name "$SERVED" --port "$PORT" --max-model-len 16384 --gpu-memory-utilization 0.85)
+SERVE_ARGS=(--vllm-env-dir "$QWEN_VLLM_ENV" --served-model-name "$SERVED" --port "$PORT" --max-model-len "$MAX_MODEL_LEN" --gpu-memory-utilization 0.85)
 if [[ -n "$MODEL_PATH" ]]; then
     # Why not --adapter-path: マージ済みなら通常モデルと同じ経路で配信でき、LoRA 対応の差に左右されない。
     SERVE_ARGS+=(--model-path "$MODEL_PATH" --model-revision "")
 fi
 (
     cd "$ROOT_DIR"
-    uv run scripts/serve_vllm.py "${SERVE_ARGS[@]}" --max-num-seqs 16 --disable-log-stats --disable-uvicorn-access-log
+    # Why --reasoning-parser: 思考を開くモデルの <think> を content から分離し、コード抽出を汚さない。
+    uv run scripts/serve_vllm.py "${SERVE_ARGS[@]}" --max-num-seqs 16 --disable-log-stats --disable-uvicorn-access-log --reasoning-parser qwen3
 ) > "$LOG_DIR/vllm_$PORT.log" 2>&1 &
 SERVER_PID=$!
 trap 'echo "[$(date +%T)] stopping server"; kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true' EXIT
@@ -71,7 +76,7 @@ for data_dir in $DATA_DIRS; do
         --model "$SERVED" \
         --label "$LABEL" \
         --run-name "$RUN_NAME-$tag" \
-        --max-tokens "$MAX_TOKENS" \
+        --max-tokens "$MAX_TOKENS" --extra-body "$EXTRA_BODY" \
         --concurrency "$CONCURRENCY" 2>&1 | tee "$LOG_DIR/eval-$tag.log" || status=$?
 done
 echo "[$(date +%T)] done (status=$status)"
