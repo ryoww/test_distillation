@@ -84,6 +84,8 @@ if [[ -n "$NVIDIA_INC" && ! -f "$CURAND_INC/curand_kernel.h" ]]; then
     mkdir -p "$CURAND_INC" && ln -sf "$NVIDIA_INC"/curand*.h "$CURAND_INC"/
 fi
 if [[ -f "$CURAND_INC/curand_kernel.h" ]]; then export NVCC_APPEND_FLAGS="${NVCC_APPEND_FLAGS:-} -I$CURAND_INC"; fi
+# FlashInfer は -L$CUDA_HOME/lib64 でリンクするが、conda 版 toolkit は lib にしか置かない。
+[[ -e "$CUDA_HOME/lib64" ]] || ln -s lib "$CUDA_HOME/lib64"
 (
     cd "$ROOT_DIR"
     # Why --reasoning-parser: 思考を開くモデルの <think> を content から分離し、コード抽出を汚さない。
