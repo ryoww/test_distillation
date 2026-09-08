@@ -71,6 +71,10 @@ if [[ -n "$MODEL_PATH" ]]; then
     # Why not --adapter-path: マージ済みなら通常モデルと同じ経路で配信でき、LoRA 対応の差に左右されない。
     SERVE_ARGS+=(--model-path "$MODEL_PATH" --model-revision "$MODEL_REVISION")
 fi
+# Why: vLLM 0.28 の FlashInfer は sampling カーネルを起動時に nvcc で JIT する。PATH の nvcc は
+# ヘッダを持たないラッパーなので、ルートに入れた CUDA 13 toolkit を明示する（学習ジョブと同じ）。
+export CUDA_HOME="$ROOT_DIR/.runtime/cuda-13.0"
+export PATH="$CUDA_HOME/bin:$PATH"
 (
     cd "$ROOT_DIR"
     # Why --reasoning-parser: 思考を開くモデルの <think> を content から分離し、コード抽出を汚さない。
