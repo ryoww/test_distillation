@@ -543,6 +543,10 @@ MODEL_PATH=../../outputs/<run>/merged LABEL=sft__agents_a1_4b sbatch --export=AL
   評価時も同じ形式で、`scripts/evaluate_solver_model.py` が DSPy を通さず直接 API を叩きます。
 - 評価結果は compare の shard 形式で `outputs/prompt_model_comparisons/<run>/` に出るので、
   `rescore_with_checkers.py` と同じ集計が使えます。
+- **推論時は `enable_thinking: false` を渡します。** Qwen3 系のテンプレートは学習データの assistant
+  冒頭に空の思考ブロック `<think>\n\n</think>\n\n` を描画します。既定のテンプレートで推論すると
+  `<think>\n` を開いたまま渡すので、学習で見ていない状態から思考を始めて出力枠を使い切ります。
+  評価ジョブでは `EXTRA_BODY='{"chat_template_kwargs": {"enable_thinking": false}}'` です。
 
 ## 9. 既知の限界
 
