@@ -548,9 +548,38 @@ MODEL_PATH=../../outputs/<run>/merged LABEL=sft__agents_a1_4b sbatch --export=AL
   `<think>\n` を開いたまま渡すので、学習で見ていない状態から思考を始めて出力枠を使い切ります。
   評価ジョブの既定はこの設定です。素のモデルを思考ありで測るときだけ `EXTRA_BODY='{}'` で上書きし、
   そのときは `MAX_MODEL_LEN` を `MAX_TOKENS` + 4096 以上にします（足りなければジョブが先に止まります）。
-- **汎化の測定**は `DATA_DIRS=data/problems EVAL_ARGS=--exclude-templated` で行います。出荷 100 問から
-  雛形化済みの 28 問を除いた 72 問だけを解かせます（`--exclude-templated` は `src.datagen.TEMPLATES`
-  の問題番号を除きます）。SFT 後のモデルはこの 72 問で素のモデルより悪化します（`RESCORE_REPORT.md` 20 章）。
+- **汎化の測定**は `EXCLUDE_TEMPLATED_DIRS=data/problems` を付けて `data/problems` を DATA_DIRS に含めます。
+  出荷 100 問から雛形化済みの 28 問を除いた 72 問だけを解かせます（`--exclude-templated` は
+  `src.datagen.TEMPLATES` の問題番号を除きます）。SFT 後のモデルはこの 72 問で素のモデルより悪化します
+  （`RESCORE_REPORT.md` 20 章）。
+
+### 9.1 他の候補モデルを同じ枡で測る
+
+同じジョブで Hugging Face 上のモデルを zero-shot 評価できます。配信名・reasoning parser・思考の
+制御・キャッシュの場所を環境変数で差し替えます。Gemma 4 12B は encoder なしの統合アーキテクチャで
+vLLM 0.20.0 に登録がないため、ルートで `bootstrap_vllm_env.py --env-dir .runtime/vllm-0.28
+--vllm-version 0.28.0` を作って `VLLM_ENV` で指します。
+
+```bash
+export QWEN_VLLM_ENV=/home/yy-lab/test_DSPy/.runtime/vllm/vllm-cu13
+export RUN_NAME=candidates-20260908 DATA_DIRS="data/problems_generated data/problems" \
+       EXCLUDE_TEMPLATED_DIRS=data/problems MODEL_HF_HOME=/home/yy-lab/test_DSPy/model/hf_home
+# Gemma 4 12B（vLLM 0.28）: 思考なし / 思考あり 64k
+export VLLM_ENV=$PWD/../../.runtime/vllm-0.28 MODEL_PATH=google/gemma-4-12B-it SERVED=gemma4-12b REASONING_PARSER=gemma4
+LABEL=gemma4_12b_nothink EXTRA_BODY='{"chat_template_kwargs": {"enable_thinking": false}}' \
+  sbatch --export=ALL scripts/slurm_eval_solver.sbatch
+LABEL=gemma4_12b_think EXTRA_BODY='{"chat_template_kwargs": {"enable_thinking": true}}' \
+  MAX_TOKENS=65536 MAX_MODEL_LEN=73728 EVAL_TIMEOUT=5400 sbatch --time=08:00:00 --export=ALL scripts/slurm_eval_solver.sbatch
+# Ministral 3 14B Reasoning（vLLM 0.20 で可）: 常時思考。推奨 system prompt を指示文の前に置く
+unset VLLM_ENV
+LABEL=ministral3_14b_reasoning MODEL_PATH=mistralai/Ministral-3-14B-Reasoning-2512 SERVED=ministral3-14b-reasoning \
+  REASONING_PARSER=mistral EXTRA_BODY='{}' SYSTEM_PREFIX_FILE=prompts/ministral3_reasoning_system.txt \
+  MAX_TOKENS=65536 MAX_MODEL_LEN=73728 EVAL_TIMEOUT=5400 sbatch --time=08:00:00 --export=ALL scripts/slurm_eval_solver.sbatch
+```
+
+- Ministral 3 は transformers 側の tokenizer が mistral-common になり、system を渡すとテンプレート既定の
+  思考用 system が入りません。`SYSTEM_PREFIX_FILE` で同じ文を前置し、思考ありの条件を保ちます。
+- 生成 140 問は全問が雛形由来なので、`EXCLUDE_TEMPLATED_DIRS` には `data/problems` だけを入れます。
 
 ## 10. 既知の限界
 
