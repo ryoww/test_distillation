@@ -6,11 +6,21 @@ from __future__ import annotations
 from . import (  # noqa: F401
     templates,
     templates_assignment,
+    templates_assignment_ext,
     templates_composite,
+    templates_composite_ext,
+    templates_covering_ext,
+    templates_knapsack_ext,
     templates_network,
+    templates_network_ext,
     templates_production,
+    templates_production_ext,
     templates_routing,
+    templates_routing_ext,
+    templates_routing_ext2,
     templates_scheduling,
+    templates_scheduling_ext,
+    templates_scheduling_ext2,
 )
 from .base import TEMPLATES, SolveError, Template
 from .pipeline import (

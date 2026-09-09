@@ -37,9 +37,11 @@ def test_solver_reproduces_original_reference_value(template_id):
     shipped = _objective_of(base, template.objective_key)
     if template.shipped_reference_optimal:
         assert solved[template.objective_key] == pytest.approx(shipped, rel=2e-3)
-    else:
-        # 同梱参照解が近似解の雛形（最小化問題）。厳密解は参照値を下回らなければならない。
+    elif template.minimize:
+        # 同梱参照解が近似解か誤申告の雛形。厳密解は参照値より良くなければならない。
         assert solved[template.objective_key] < shipped
+    else:
+        assert solved[template.objective_key] > shipped
     assert set(solved) == set(base["reference_solution"])
 
 

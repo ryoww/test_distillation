@@ -26,13 +26,19 @@ class Template:
     solve: Callable[[dict], dict]
     # 同梱の参照解が厳密最適でない雛形は、参照値の再現ではなく参照値より良いことを検証する。
     shipped_reference_optimal: bool = True
+    # 「より良い」の向き。最大化問題の雛形は False にする。
+    minimize: bool = True
 
 
 TEMPLATES: dict[int, Template] = {}
 
 
 def register(
-    problem_id: int, objective_key: str, *, shipped_reference_optimal: bool = True
+    problem_id: int,
+    objective_key: str,
+    *,
+    shipped_reference_optimal: bool = True,
+    minimize: bool = True,
 ) -> Callable:
     """`(generate, solve)` の組を返す関数をテンプレートとして登録する。"""
 
@@ -44,6 +50,7 @@ def register(
             generate,
             solve,
             shipped_reference_optimal=shipped_reference_optimal,
+            minimize=minimize,
         )
         return factory
 
