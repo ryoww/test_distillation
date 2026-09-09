@@ -180,14 +180,16 @@ GEPAは各反復で候補の指示文を1つ選び，訓練問題3問の失敗�
 検証13問が満点で飽和した後は，検証集合で候補を比べる余地がなく，残りの予算は使い切るだけになった．
 指示文が訓練問題固有の規則の列挙になるのは，GEPAの既定の反省プロンプトが「ドメイン固有の事実をすべて指示文に含めよ」と指示しているためである．
 
+
+以上から，既定の指示文をcompactに切り替えた．
+
+
 \begin{figure}[H]
   \centering
   \includegraphics[width=0.95\linewidth]{./assets/gepa_val_curve.png}
   \caption{再学習GEPAの検証スコアの推移（縦軸は各時点までの最良候補の検証13問平均．破線は最良が最後に更新された反復152）}
   \label{fig:gepa}
 \end{figure}
-
-以上から，既定の指示文をcompactに切り替えた．
 
 
 \subsection{上限の確認: Claude Fable 5.1}
