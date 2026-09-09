@@ -548,6 +548,9 @@ MODEL_PATH=../../outputs/<run>/merged LABEL=sft__agents_a1_4b sbatch --export=AL
   `<think>\n` を開いたまま渡すので、学習で見ていない状態から思考を始めて出力枠を使い切ります。
   評価ジョブの既定はこの設定です。素のモデルを思考ありで測るときだけ `EXTRA_BODY='{}'` で上書きし、
   そのときは `MAX_MODEL_LEN` を `MAX_TOKENS` + 4096 以上にします（足りなければジョブが先に止まります）。
+- 土台を差し替えるときは `EXTRA_ARGS='--model <repo> --model-revision main'` を渡します。Gemma 4 のように
+  `enable_thinking` で描画が変わるテンプレートは `--chat-template-kwargs {"enable_thinking":true}` も渡し、
+  評価の `EXTRA_BODY` と一致させます（22 章。JSON は空白なしで 1 語にします）。
 - **汎化の測定**は `EXCLUDE_TEMPLATED_DIRS=data/problems` を付けて `data/problems` を DATA_DIRS に含めます。
   出荷 100 問から雛形化済みの 28 問を除いた 72 問だけを解かせます（`--exclude-templated` は
   `src.datagen.TEMPLATES` の問題番号を除きます）。SFT 後のモデルはこの 72 問で素のモデルより悪化します
@@ -604,8 +607,9 @@ LABEL=ministral3_14b_reasoning MODEL_PATH=mistralai/Ministral-3-14B-Reasoning-25
 - Slurm 外で GPU を直接使うときは、配信の停止で EngineCore が残らないか `nvidia-smi` で確認してください。
   ジョブはプロセスグループごと止めますが、手で kill した場合は残ることがあります。
 - 特化 SFT した 4B（`RESCORE_REPORT.md` 19 章）は学習した 28 雛形の外では素の 4B を下回ります
-  （雛形外 70 問で 0.602 → 0.430、20 章）。汎用 solver としては使えず、雛形を増やす以外に
-  対象範囲を広げる方法はありません。
+  （雛形外 70 問で 0.602 → 0.430、20 章）。土台を Gemma 4 12B にしても同じで、雛形外は 1.050 → 0.646 に
+  落ちます（22 章）。雛形内は 4B と 12B で差がなく、雛形外を含む運用では素の Gemma 4 12B 思考なしを
+  そのまま使うほうが強いです。対象範囲を広げるには雛形を増やすか、忘却を抑える学習を試す必要があります。
 - 修正済み採点系で再学習した GEPA（17 章）は Qwen3.8 で有意に効きますが、検証 13 問は満点で
   飽和し、学んだ規則は見た雛形に固有です。見ていない問題種別への汎化は測れていません。
 - Qwen3.8 は思考が `max_tokens` 32,768 を使い切って本文が空になる問題が 140 問中 21〜35 問

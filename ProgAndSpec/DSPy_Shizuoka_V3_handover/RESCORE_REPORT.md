@@ -986,3 +986,82 @@ paired bootstrap（10,000 回）:
 - 配信の親プロセスだけを止めると EngineCore が GPU メモリ（120 GB）を握って残る。ジョブは
   プロセスグループごと止めるようにした。
 - `${VAR:-{json}}` 形式の既定値は bash の展開が乱れ、値を渡したときに `}}` が余分に付く。
+
+## 22. Gemma 4 12B を土台にした特化 SFT（2026-09-09）
+
+### 22.1 設定
+
+21 章で最良だった Gemma 4 12B を、19 章と同じ検証済み 6,619 対で LoRA 学習した。問い は「20 章の
+雛形外での劣化が、土台を 4B → 12B にすると緩むか」。
+
+- 学習: `train_distillation.py --model google/gemma-4-12B-it --chat-template-kwargs '{"enable_thinking":true}'`、
+  LoRA r=32 / α=64（言語部 328 層）、lr 1e-4、2 epoch、max_length 6144、実効バッチ 8。
+  1,656 step、3 時間 4 分（GPU 1 枚、VRAM 75 GB）。train_loss 0.0295、eval_loss 0.00366。
+- 描画: 学習・推論とも `enable_thinking=true`。Gemma のテンプレートは true のとき system に `<|think|>`
+  を立てて assistant 直前に何も挟まず、false のとき推論側だけ空の思考ブロックを挟む。true で揃えると
+  学習で見た列と推論の prompt が token 単位で一致する（`tests/test_semantic_labels.py`）。
+- 評価: 焼き込み後に vLLM 0.28 で配信、6k 枠、思考なし。3 集合とも 3 分前後。
+- 成果物: `outputs/solver-gemma4-12b-lora-20260909/{adapter,merged}`（532 MB / 23 GB）、結果は
+  `outputs/prompt_model_comparisons/sft-gemma4-20260909-*`、再採点 `rescored-sft-gemma-*-20260909.json`。
+
+### 22.2 結果
+
+| 集合 | 素の Gemma 12B | SFT Gemma 12B | SFT 4B（19 章） | 素の 4B |
+|---|---:|---:|---:|---:|
+| 雛形内テスト 140 問（未知 instance） | — | **1.500**（139/140） | 1.487（138/140） | 0.723 |
+| 生成 140 問 | 1.329（124） | **1.504**（140/140） | 1.504（140/140） | 0.706 |
+| 雛形外 70 問 | **1.050**（48） | 0.646（28） | 0.430（18） | 0.602（27） |
+| 平均出力トークン（生成 140） | 1,025 | 511 | 472 | 1,686 |
+
+paired bootstrap（10,000 回）:
+
+- 雛形内テスト: SFT Gemma − SFT 4B +0.013 [+0.000, +0.039]。生成 140 問では両者とも全問正解で差 0。
+  SFT Gemma − Fable +0.010 [−0.000, +0.025]、− Qwen3.6 compact +0.079 [+0.026, +0.143]。
+- 雛形外 70 問: SFT Gemma − 素の Gemma **−0.403 [−0.614, −0.201]**（有意に悪化）。
+  − 素の 4B +0.045 [−0.211, +0.299]、− SFT 4B +0.216 [−0.013, +0.431]、− Qwen3.6 before −0.495 [−0.732, −0.268]。
+- 雛形外の問題単位: 両方正解 25、素の Gemma のみ 23、SFT のみ 3、両方不正解 19。
+
+### 22.3 解釈
+
+- **雛形内では土台の規模は効かない。** 4B も 12B も未知 instance で 138〜139 / 140、生成 140 問は
+  全問正解で、Fable と同等の天井に張り付く。教師データが決める部分であり、12B にする理由はない。
+- **雛形外の劣化は 12B でも起きる。** 素の Gemma が 48 問解けた集合で SFT 後は 28 問に落ち、
+  その落ち方（形式不備 11、部分違反 13、例外時に固定値を返す fallback が 70 問中 53 問）は 20 章の
+  4B と同じ。土台の汎化力（Qwen3.6 級）を 3 時間の LoRA でほぼ素の 4B の水準（0.646 vs 0.602）まで
+  削っている。「規模を上げれば劣化が緩む」という見立ては否定された。
+- **原因は教師データの狭さで、土台ではない。** 168 通りのコードを 6,619 対に展開した分布に 2 epoch
+  当てると、モデルは「28 雛形のどれかに当てはめて型どおり返す」方策を学び、見慣れない問題でも同じ
+  型を押し付ける。雛形内のスコアが高いほど雛形外は落ちる構造で、これは LoRA の容量や学習率の
+  問題ではない。
+- **実用上の位置づけ。** 対象が 28 雛形に閉じているなら 4B で十分で、12B にする利益はない。雛形外を
+  含む運用では、素の Gemma 4 12B 思考なし（1.329 / 1.050、7 分）をそのまま使うほうが、どちらの SFT
+  モデルより総合で強い。
+
+### 22.4 今後の選択肢
+
+1. **雛形を増やす。** 特化の外を減らす最も確実な方法。生成器とソルバーを 1 組ずつ書けば同じ手順で乗る。
+2. **忘却を抑える学習。** 教師データに一般のコード・指示データを混ぜる、1 epoch・低 lr に抑える、
+   雛形外の問題を検証付きで教師に加える（Gemma 自身の正解コードを 48 問ぶん収穫できる）。
+   雛形内 1.50 を保ったまま雛形外を 1.05 に近づけられるかが評価軸になる。
+3. **切り替え運用。** 問題が 28 雛形に当たるかを判定し、当たれば SFT 4B、外れれば素の Gemma 12B に
+   回す。判定は `shape_signature` と core_type で機械的にできる。
+
+### 22.5 再現
+
+```bash
+cd ProgAndSpec/DSPy_Shizuoka_V3_handover
+export HF_HOME=/home/yy-lab/test_DSPy/model/hf_home
+RUN_NAME=solver-gemma4-12b-lora EPOCHS=2 LORA_R=32 \
+  EXTRA_ARGS='--model google/gemma-4-12B-it --model-revision main --chat-template-kwargs {"enable_thinking":true}' \
+  sbatch --export=ALL scripts/slurm_train_solver.sbatch
+(cd ../.. && .runtime/train/bin/python scripts/merge_adapter.py --adapter outputs/solver-gemma4-12b-lora/adapter \
+  --output outputs/solver-gemma4-12b-lora/merged --model google/gemma-4-12B-it --model-revision main)
+export QWEN_VLLM_ENV=/home/yy-lab/test_DSPy/.runtime/vllm/vllm-cu13 VLLM_ENV=$PWD/../../.runtime/vllm-0.28
+MODEL_PATH=$PWD/../../outputs/solver-gemma4-12b-lora/merged LABEL=sft_gemma4_12b SERVED=gemma4-12b-solver \
+  REASONING_PARSER=gemma4 EXTRA_BODY='{"chat_template_kwargs": {"enable_thinking": true}}' \
+  DATA_DIRS="data/sft/problems_test data/problems_generated data/problems" EXCLUDE_TEMPLATED_DIRS=data/problems \
+  MODEL_HF_HOME=$HF_HOME sbatch --export=ALL scripts/slurm_eval_solver.sbatch
+```
+
+今回は GPU が Slurm で塞がっていたため、同じスクリプトを `SLURM_JOB_ID` を手で与えて GPU 1 で直接
+実行した（`outputs/slurm/manual-gpu1-sft-gemma.log`）。
