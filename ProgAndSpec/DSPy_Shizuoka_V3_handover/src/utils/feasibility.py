@@ -14,10 +14,20 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from .feasibility_shapes import (
+    check_broadcast_lineup,
+    check_class_timetable,
     check_cluster_node_assignment,
     check_day1_routes,
+    check_event_staff_roster,
     check_flow_shop_sequence,
+    check_gate_assignment,
+    check_job_shop_schedule,
+    check_meeting_room_assignment,
+    check_multi_project_schedule,
+    check_nurse_roster,
+    check_operating_room_schedule,
     check_parallel_machine_assignment,
+    check_rcpsp_schedule,
 )
 
 CHECKERS: dict[str, Callable[[dict, Any], bool]] = {}
@@ -418,18 +428,6 @@ def check_scheduling_dp_detailed(instance: dict, solution: any) -> dict:
 def check_scheduling_jobshop_detailed(instance: dict, solution: any) -> dict:
     """スケジューリング_(混合)整数計画 (job shop): スケジュール構造チェック。"""
     violations = []
-    jobs = instance.get("jobs", [])
-    if not jobs:
-        return {
-            "feasible": True,
-            "partial_score": 1.0,
-            "violation_count": 0,
-            "total_constraints": 0,
-            "violations": [],
-            "cost": None,
-        }
-
-    n = len(jobs)
 
     if not isinstance(solution, dict):
         violations.append(f"solution is not a dict: {type(solution).__name__}")
@@ -447,10 +445,36 @@ def check_scheduling_jobshop_detailed(instance: dict, solution: any) -> dict:
         check_parallel_machine_assignment,
         check_flow_shop_sequence,
         check_cluster_node_assignment,
+        check_job_shop_schedule,
+        check_nurse_roster,
+        check_meeting_room_assignment,
+        check_gate_assignment,
+        check_operating_room_schedule,
+        check_rcpsp_schedule,
+        check_broadcast_lineup,
+        check_class_timetable,
+        check_event_staff_roster,
+        check_multi_project_schedule,
     ):
         result = strict(instance, solution)
         if result is not None:
             return result
+
+    jobs = instance.get("jobs", [])
+    if not jobs:
+        # Why not feasible=True のまま返す: jobs のない instance は何も検証していないので、
+        # 満点にすると参照解もモデルの解も無検査で合格する。未検証として返す。
+        return {
+            "feasible": True,
+            "verified": False,
+            "partial_score": 1.0,
+            "violation_count": 0,
+            "total_constraints": 0,
+            "violations": ["unrecognized shape: no strict checker reads this instance"],
+            "cost": None,
+        }
+
+    n = len(jobs)
 
     schedule = solution.get("schedule", solution.get("assignments", solution.get("assignment")))
     if not schedule:
@@ -563,9 +587,33 @@ def check_scheduling_graph_detailed(instance: dict, solution: any) -> dict:
     }
 
 
+def vrp_view(instance: dict, solution: any) -> tuple[dict, any]:
+    """動的 VRP（initial_customers / initial_routes）と収集 VRP（segments / waste_volume /
+    truck_capacity / num_trucks）を、基本 CVRP と同じ customers 表記に揃える。"""
+    inst = dict(instance)
+    if "customers" not in inst:
+        if isinstance(inst.get("initial_customers"), list):
+            inst["customers"] = inst["initial_customers"]
+        elif isinstance(inst.get("segments"), list):
+            inst["customers"] = [
+                {**seg, "demand": seg.get("demand", seg.get("waste_volume", 0))}
+                for seg in inst["segments"]
+            ]
+    if "vehicle_capacity" not in inst and "truck_capacity" in inst:
+        inst["vehicle_capacity"] = inst["truck_capacity"]
+    if "num_vehicles" not in inst and "num_trucks" in inst:
+        inst["num_vehicles"] = inst["num_trucks"]
+    if isinstance(solution, dict) and "routes" not in solution and "initial_routes" in solution:
+        solution = {**solution, "routes": solution["initial_routes"]}
+        if "total_distance" not in solution and "total_initial_distance" in solution:
+            solution["total_distance"] = solution["total_initial_distance"]
+    return inst, solution
+
+
 def check_vrp_v3_detailed(instance: dict, solution: any) -> dict:
     """配送・輸送_混合整数計画/確率最適化: ルート構造 + 顧客カバー率チェック。"""
     violations = []
+    instance, solution = vrp_view(instance, solution)
     customers = instance.get("customers", [])
     if not customers:
         return {

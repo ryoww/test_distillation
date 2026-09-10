@@ -43,6 +43,7 @@ _SOFT_ABS_TOL = 2e-2
 # 座標が整数へ丸められた状態で被覆判定された参照解があるため、半径には
 # 1単位ぶんの余裕を持たせる。
 _RADIUS_SLACK = 1.0
+_BOND_FACE_VALUE = 100.0
 
 
 def _result(
@@ -834,20 +835,23 @@ def check_network_flow_graph(instance: dict, solution: Any) -> dict:
             violations.append(f"path starts at {path[0]}, expected {instance['start']}")
         if path[-1] != instance["goal"]:
             violations.append(f"path ends at {path[-1]}, expected {instance['goal']}")
-        lookup: dict[frozenset, float] = {}
+        # Why not frozenset で無向扱い: from/to の有向辺に逆平行辺があると長さが上書きされ、
+        # 正しい経路に偽の違反が出る。u/v 表記の辺だけ両向きに登録する。
+        lookup: dict[tuple[Any, Any], float] = {}
         for edge in edges:
             ends = _edge_ends(edge)
             if ends is None:
                 continue
-            length = _num(edge.get("length")) if isinstance(edge, dict) else None
-            lookup[frozenset(ends)] = length or 0.0
+            length = (_num(edge.get("length")) if isinstance(edge, dict) else None) or 0.0
+            lookup[ends] = length
+            if isinstance(edge, dict) and "from" not in edge and "source" not in edge:
+                lookup[(ends[1], ends[0])] = length
         total = 0.0
         for head, tail in pairwise(path):
-            key = frozenset((head, tail))
-            if key not in lookup:
+            if (head, tail) not in lookup:
                 violations.append(f"edge {head}->{tail} does not exist")
                 continue
-            total += lookup[key]
+            total += lookup[(head, tail)]
         claimed = _num(_pick(solution, "shortest_distance", "distance", "objective_value"))
         if claimed is not None and not _close(claimed, total):
             violations.append(f"shortest_distance {claimed:g} != path length {total:g}")
@@ -2443,9 +2447,27 @@ def check_finance_lp(instance: dict, solution: Any) -> dict:
                 violations.append(f"bond {bond_id} holding {qty:g} is negative")
             if 0 <= bond_id < len(bonds):
                 spend += qty * (_num(bonds[bond_id].get("price")) or 0.0)
+        # 各年: クーポン + 満期の額面 + 前年からの繰越 >= 負債。額面は instance にないので、
+        # 同梱参照解（債券 2 を 19.333 単位で 2 年目の負債 80 を償還で賄う）から 100 と読む。
+        liabilities = _num_list(instance.get("liabilities")) or []
+        carry = 0.0
+        for year, liability in enumerate(liabilities, start=1):
+            inflow = carry
+            for bond_id, qty_raw in holdings.items():
+                if not 0 <= bond_id < len(bonds):
+                    continue
+                qty = _num(qty_raw) or 0.0
+                maturity = _num(bonds[bond_id].get("maturity")) or 0
+                if year <= maturity:
+                    inflow += qty * (_num(bonds[bond_id].get("coupon")) or 0.0)
+                if year == maturity:
+                    inflow += qty * _BOND_FACE_VALUE
+            if inflow + _SOFT_ABS_TOL < liability:
+                violations.append(f"year {year} cash {inflow:g} short of liability {liability:g}")
+            carry = max(inflow - liability, 0.0)
         claimed = _num(_pick(solution, "min_cost", "total_cost", "objective_value"))
         if claimed is not None and not _close_soft(claimed, spend):
             violations.append(f"min_cost {claimed:g} != purchase cost {spend:g}")
-        return _result(violations, 2, cost=spend)
+        return _result(violations, 2 + len(liabilities), cost=spend)
 
     return _unverified("unknown finance LP shape")
