@@ -28,6 +28,9 @@ class Template:
     shipped_reference_optimal: bool = True
     # 「より良い」の向き。最大化問題の雛形は False にする。
     minimize: bool = True
+    # 同梱参照解が実行不可能で、実行可能解では到達できない値を申告している雛形は False にする。
+    # このとき厳密解と同梱値の大小は比べない。
+    shipped_reference_feasible: bool = True
 
 
 TEMPLATES: dict[int, Template] = {}
@@ -39,6 +42,7 @@ def register(
     *,
     shipped_reference_optimal: bool = True,
     minimize: bool = True,
+    shipped_reference_feasible: bool = True,
 ) -> Callable:
     """`(generate, solve)` の組を返す関数をテンプレートとして登録する。"""
 
@@ -51,6 +55,7 @@ def register(
             solve,
             shipped_reference_optimal=shipped_reference_optimal,
             minimize=minimize,
+            shipped_reference_feasible=shipped_reference_feasible,
         )
         return factory
 

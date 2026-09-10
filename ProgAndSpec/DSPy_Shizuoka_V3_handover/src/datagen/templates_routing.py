@@ -13,10 +13,6 @@ from itertools import pairwise
 
 from .base import register, retry
 
-# Why not prob_026（動的 VRP）: 問題文は「初期時点で5人の顧客」だが instance の初期顧客は
-# 4 人で、参照解 initial_routes も切り捨て距離の近似解（88、厳密には 73）。文章と
-# instance が食い違う雛形は生成に使わない。
-
 
 def _leg(a: dict, b: dict) -> float:
     """丸めなしのユークリッド距離。
