@@ -482,7 +482,13 @@ def compute_v3_score(
             status = "similar"
 
     # Bonus 1: Exact match / beating the reference (reference mode only)
-    if use_reference and reference_cost is not None and reference_cost > 0:
+    # Why not reference_cost > 0 だけ: 部分和の差 0 や未割当 0 件のように最適値が 0 の問題では、
+    # 正解が exact_match にならず first_valid に落ちていた。
+    if use_reference and reference_cost == 0 and abs(cost) < 1e-6:
+        bonuses["exact_match"] = 0.2
+        base = max(base + 0.2, 1.5)
+        status = "exact_match"
+    elif use_reference and reference_cost is not None and reference_cost > 0:
         if abs(cost - reference_cost) < 1e-6:
             bonuses["exact_match"] = 0.2
             # Guarantee minimum score of 1.5 for exact match (fix for best_known=0 bug)

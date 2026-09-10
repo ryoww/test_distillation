@@ -302,3 +302,16 @@ def test_safe_run_converts_numpy_dict_keys_and_blocks_module_smuggling():
         ok, result = safe_run(code, {}, timeout=10)
         assert not ok, result
         assert "not allowed" in str(result) or "cannot import name" in str(result), result
+
+
+def test_zero_reference_value_still_yields_exact_match():
+    """What: a cost of 0 against a reference of 0 (subset sum, no unassigned flights) is exact_match."""
+    from src.metrics_v3 import compute_v3_score
+
+    score, status, bonuses = compute_v3_score(cost=0.0, reference_cost=0.0, best_known=None)
+    assert status == "exact_match"
+    assert score == pytest.approx(1.5)
+    assert bonuses["exact_match"] == pytest.approx(0.2)
+    _, worse_status, _ = compute_v3_score(cost=3.0, reference_cost=0.0, best_known=None)
+    assert worse_status != "exact_match"
+
