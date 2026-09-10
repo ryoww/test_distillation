@@ -27,7 +27,7 @@ if str(BASE_DIR) not in sys.path:
 
 from src import best_known as _best_known
 from src.data_loader import convert_to_dspy_example
-from src.datagen import generate_dataset
+from src.datagen import TEMPLATES, generate_dataset
 from src.metrics_v3 import evaluate_algorithm_v3
 from src.modules import AlgorithmGenerator, ensure_parse_helpers
 
@@ -36,7 +36,8 @@ COMPARISONS = BASE_DIR / "outputs" / "prompt_model_comparisons"
 PROBLEM_DIR = BASE_DIR / "data" / "problems"
 GENERATED_DIR = BASE_DIR / "data" / "problems_generated"
 
-# 正解コードの出典。先に並ぶ出典を優先して雛形ごとの候補を選ぶ。
+# 正解コードの出典。先に並ぶ出典を優先して雛形ごとの候補を選ぶ。生成 140 問への解のあとに、
+# 同梱 100 問への解を並べる。同梱問題は自分自身が雛形なので、雛形化した問題の教師になる。
 SOURCES: list[tuple[str, str, str]] = [
     ("fable", "rescored-final-fable-20260907.json", "generated140-fable-20260907"),
     (
@@ -71,6 +72,32 @@ SOURCES: list[tuple[str, str, str]] = [
         "rescored-final-qwen38-20260907.json",
         "generated140-qwen38-max64k-20260905-before",
     ),
+    (
+        "shipped-qwen36-before",
+        "rescored-shipped100-20260908.json",
+        "prompt-model-qwen36-mtp131k-20260901",
+    ),
+    (
+        "shipped-qwen36-after",
+        "rescored-shipped100-20260908.json",
+        "prompt-model-qwen36-mtp131k-20260901",
+    ),
+    ("shipped-gemma4", "rescored-candidates-shipped-20260909.json", "candidates-20260908-problems"),
+    (
+        "shipped-qwen38-after",
+        "rescored-shipped100-20260908.json",
+        "prompt-model-qwen38-mtp131k-20260901",
+    ),
+    (
+        "shipped-ministral3",
+        "rescored-candidates-shipped-20260909.json",
+        "candidates-20260908-problems",
+    ),
+    (
+        "shipped-qwen38-before",
+        "rescored-shipped100-20260908.json",
+        "prompt-model-qwen38-mtp131k-20260901",
+    ),
 ]
 CONDITION_OF = {
     "fable": "fable__claude",
@@ -82,7 +109,16 @@ CONDITION_OF = {
     "qwen38-compact": "compact__qwen3_8_27b",
     "qwen38-after": "after__qwen3_8_27b",
     "qwen38-before": "before__qwen3_8_27b",
+    "shipped-qwen36-before": "before__qwen3_6_27b",
+    "shipped-qwen36-after": "after__qwen3_6_27b",
+    "shipped-gemma4": "gemma4_12b_nothink",
+    "shipped-qwen38-after": "after__qwen3_8_27b",
+    "shipped-ministral3": "ministral3_14b_reasoning",
+    "shipped-qwen38-before": "before__qwen3_8_27b",
 }
+# 同梱の参照解が近似解の問題では、正しいコードが beat_reference になる。新 instance の厳密解で
+# 再検証するので、候補集めの段階では両方を通す。
+TEACHER_STATUSES = {"exact_match", "beat_reference"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,7 +138,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def template_of_generated() -> dict[str, int]:
-    mapping = {}
+    """instance_id → 雛形 id。生成問題は provenance から、同梱問題は自分の番号。"""
+    mapping = {f"prob_{template_id:03d}": template_id for template_id in TEMPLATES}
     for path in GENERATED_DIR.glob("prob_*.json"):
         record = json.loads(path.read_text(encoding="utf-8"))
         mapping[f"prob_{record['id']}"] = record["provenance"]["template_id"]
@@ -126,9 +163,11 @@ def collect_candidates(codes_per_template: int) -> dict[int, list[dict]]:
         for shard in sorted((COMPARISONS / run_dir).glob(f"{condition}__shard*/{RESULT_FILENAME}")):
             for row in json.loads(shard.read_text(encoding="utf-8"))["test"]["results"]:
                 code = row.get("code")
-                if not code or verdict.get((condition, row["instance_id"])) != "exact_match":
+                if not code or verdict.get((condition, row["instance_id"])) not in TEACHER_STATUSES:
                     continue
-                template_id = template_of[row["instance_id"]]
+                template_id = template_of.get(row["instance_id"])
+                if template_id is None:  # 雛形化していない同梱問題
+                    continue
                 normalized = ensure_parse_helpers(code.strip())
                 if normalized in seen[template_id]:
                     continue
@@ -179,18 +218,40 @@ def _verify(args: tuple[dict, dict, float]) -> tuple[str, str, dict]:
     )
 
 
-def fresh_split(
-    name: str, seed: int, per_template: int, template_ids: list[int], start_id: int, out_dir: Path
-) -> list[dict]:
-    """雛形生成器で新しい問題集を作り、problem ディレクトリとしても書き出す。"""
-    records = generate_dataset(
+def _generate_one_template(args: tuple[int, int, int, int, str]) -> list[dict]:
+    template_id, per_template, seed, start_id, split = args
+    return generate_dataset(
         PROBLEM_DIR,
-        template_ids=template_ids,
+        template_ids=[template_id],
         per_template=per_template,
         seed=seed,
         start_id=start_id,
-        split=name,
+        split=split,
     )
+
+
+def fresh_split(
+    name: str,
+    seed: int,
+    per_template: int,
+    template_ids: list[int],
+    start_id: int,
+    out_dir: Path,
+    workers: int = 8,
+) -> list[dict]:
+    """雛形生成器で新しい問題集を作り、problem ディレクトリとしても書き出す。
+
+    雛形ごとに別プロセスで生成する。id は generate_dataset を一括で呼んだときと同じ並びになる。
+    """
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        chunks = pool.map(
+            _generate_one_template,
+            [
+                (template_id, per_template, seed, start_id + index * per_template, name)
+                for index, template_id in enumerate(template_ids)
+            ],
+        )
+        records = [record for chunk in chunks for record in chunk]
     problems_dir = out_dir / f"problems_{name}"
     problems_dir.mkdir(parents=True, exist_ok=True)
     for record in records:
@@ -262,21 +323,30 @@ def main() -> None:
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
     selected = collect_candidates(args.codes_per_template)
+    # Why not 候補のある雛形だけ: 教師コードのない雛形もテスト集合には入れて、解けないことを測れるようにする。
     template_ids = (
-        sorted(selected) if args.templates == "all" else [int(t) for t in args.templates.split(",")]
+        sorted(TEMPLATES)
+        if args.templates == "all"
+        else [int(t) for t in args.templates.split(",")]
     )
+    without_teacher = [t for t in template_ids if not selected.get(t)]
     instruction = AlgorithmGenerator().generate.predict.signature.instructions
     print(
         f"candidates: {sum(len(v) for v in selected.values())} codes over {len(selected)} templates"
     )
 
-    stats: dict = {"candidates_per_template": {t: len(v) for t, v in sorted(selected.items())}}
+    if without_teacher:
+        print(f"templates without teacher code: {without_teacher}")
+    stats: dict = {
+        "candidates_per_template": {t: len(selected.get(t, [])) for t in template_ids},
+        "templates_without_teacher": without_teacher,
+    }
     for name, seed, per_template, start in (
         ("train", args.train_seed, args.train_per_template, 20001),
         ("validation", args.val_seed, args.val_per_template, 30001),
         ("test", args.test_seed, args.test_per_template, 40001),
     ):
-        records = fresh_split(name, seed, per_template, template_ids, start, out)
+        records = fresh_split(name, seed, per_template, template_ids, start, out, args.workers)
         by_id = {r["id"]: r for r in records}
         kept, counts = build_pairs(records, selected, args.workers, args.timeout)
         rows = [
