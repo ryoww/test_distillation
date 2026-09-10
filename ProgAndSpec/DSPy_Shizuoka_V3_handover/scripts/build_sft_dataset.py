@@ -119,6 +119,9 @@ CONDITION_OF = {
 # 同梱の参照解が近似解の問題では、正しいコードが beat_reference になる。新 instance の厳密解で
 # 再検証するので、候補集めの段階では両方を通す。
 TEACHER_STATUSES = {"exact_match", "beat_reference"}
+# モデルの正解がどの出典にもない雛形のために手で書いた solve()。prob_XXX*.py の番号が雛形 id。
+HANDWRITTEN_DIR = BASE_DIR / "prompts" / "teacher_codes"
+SOURCE_ORDER = [source for source, _, _ in SOURCES] + ["handwritten"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -144,6 +147,21 @@ def template_of_generated() -> dict[str, int]:
         record = json.loads(path.read_text(encoding="utf-8"))
         mapping[f"prob_{record['id']}"] = record["provenance"]["template_id"]
     return mapping
+
+
+def handwritten_candidates(directory: Path) -> dict[int, list[dict]]:
+    """prompts/teacher_codes/prob_007.py のような手書きの solve() を雛形 id ごとに読む。"""
+    pools: dict[int, list[dict]] = defaultdict(list)
+    for path in sorted(directory.glob("prob_*.py")):
+        template_id = int(path.stem.split("_")[1])
+        pools[template_id].append(
+            {
+                "code": ensure_parse_helpers(path.read_text(encoding="utf-8").strip()),
+                "source": "handwritten",
+                "origin": path.name,
+            }
+        )
+    return pools
 
 
 def collect_candidates(codes_per_template: int) -> dict[int, list[dict]]:
@@ -175,6 +193,11 @@ def collect_candidates(codes_per_template: int) -> dict[int, list[dict]]:
                 pools[template_id].append(
                     {"code": normalized, "source": source, "origin": row["instance_id"]}
                 )
+    for template_id, entries in handwritten_candidates(HANDWRITTEN_DIR).items():
+        for entry in entries:
+            if entry["code"] not in seen[template_id]:
+                seen[template_id].add(entry["code"])
+                pools[template_id].append(entry)
     # Why not 出典を混ぜてから切る: 強いモデルの解を優先しつつ、同じ雛形で複数の書き方を残す。
     rng = random.Random(0)
     selected: dict[int, list[dict]] = {}
@@ -183,7 +206,7 @@ def collect_candidates(codes_per_template: int) -> dict[int, list[dict]]:
         for entry in pool:
             by_source[entry["source"]].append(entry)
         picked: list[dict] = []
-        for source, _, _ in SOURCES:
+        for source in SOURCE_ORDER:
             candidates = by_source.get(source, [])
             rng.shuffle(candidates)
             picked.extend(candidates[: max(1, codes_per_template // 3)])

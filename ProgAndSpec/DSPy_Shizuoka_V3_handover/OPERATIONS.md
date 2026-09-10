@@ -562,6 +562,9 @@ MODEL_PATH=../../outputs/<run>/merged LABEL=sft__agents_a1_4b sbatch --export=AL
   `beat_reference` になるため、候補集めでは `exact_match` と `beat_reference` の両方を通し、
   新 instance の厳密解での再検証で選別します。教師コードが 1 件もない雛形は `stats.json` の
   `templates_without_teacher` に出ます。その雛形はテスト集合には入りますが学習対は 0 件です。
+  どのモデルも正解していない雛形には `prompts/teacher_codes/prob_XXX.py` に手書きの `solve()` を
+  置けます（番号が雛形 id、同じ番号のファイルは複数可）。出典の優先順では最後で、他の出典と同じく
+  新 instance で再検証してから学習対になります。
 - 入力は system = 既定の指示文（compact）、user = 参照値を含まない requirement です。学習時も
   評価時も同じ形式で、`scripts/evaluate_solver_model.py` が DSPy を通さず直接 API を叩きます。
 - 評価結果は compare の shard 形式で `outputs/prompt_model_comparisons/<run>/` に出るので、
