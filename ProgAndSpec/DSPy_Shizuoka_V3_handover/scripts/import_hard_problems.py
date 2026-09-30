@@ -27,6 +27,17 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parents[1]
 ID_OFFSET = 300
 META_KEYS = ("bound", "gap_percent", "is_optimal", "method", "time_limit_sec", "naive_milp_result")
+# 同梱の best_objective が問題文の費用式と食い違う問題。検証器（src/utils/hard）で解の構造から
+# 再計算した値に置き換え、元の申告値は reference_meta に残す。
+REFERENCE_OVERRIDES: dict[int, tuple[float, str]] = {
+    28: (
+        12172143.43,
+        (
+            "申告値 12340959.87 は生産費 (production_cost × 調達量) を二重に計上している。"
+            "要件の費用項目どおり 1 回だけ数えた値に置き換えた。"
+        ),
+    ),
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,6 +88,11 @@ def convert(record: dict, exec_timeout: int) -> dict:
         raise TypeError(f"record {record.get('id')} has no solution dict")
     if not isinstance(reference.get("best_objective"), (int, float)):
         raise TypeError(f"record {record.get('id')} has no numeric best_objective")
+    objective = reference["best_objective"]
+    meta = {k: reference.get(k) for k in META_KEYS}
+    if int(record["id"]) in REFERENCE_OVERRIDES:
+        objective, reason = REFERENCE_OVERRIDES[int(record["id"])]
+        meta["objective_correction"] = {"shipped": reference["best_objective"], "reason": reason}
     converted = {
         "id": ID_OFFSET + int(record["id"]),
         "name": record["name"],
@@ -91,11 +107,11 @@ def convert(record: dict, exec_timeout: int) -> dict:
         "requirements": record["requirements"],
         "instance": record["instance"],
         "reference_solution": {
-            "objective_value": reference["best_objective"],
+            "objective_value": objective,
             **{k: v for k, v in solution.items() if k != "note"},
             "note": "ヒューリスティック解（最適性は未証明）。objective_value がその目的値。",
         },
-        "reference_meta": {k: reference.get(k) for k in META_KEYS},
+        "reference_meta": meta,
         "provenance": {"source": "hard", "original_id": record["id"]},
     }
     return converted
