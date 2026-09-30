@@ -80,7 +80,11 @@ def check_feasibility_detailed(core_type: str, instance: dict, solution: Any) ->
     Returns:
         dict with keys: feasible, partial_score, violation_count, total_constraints, violations, cost
     """
-    fn = CHECKERS_DETAILED.get(core_type)
+    # 大規模問題集は core_type が同梱問題と重なるので、instance の形で先に振り分ける。
+    from .hard import find_kind
+
+    hard_kind = find_kind(instance)
+    fn = hard_kind.check if hard_kind else CHECKERS_DETAILED.get(core_type)
     if fn is None:
         # Fallback: 基本的なチェックのみ
         if solution is None:

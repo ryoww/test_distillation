@@ -23,12 +23,24 @@ def register_scorer(core_type: str, fn: Callable[[dict, Any], float]) -> None:
     SCORERS[core_type] = fn
 
 
-def has_scorer(core_type: str) -> bool:
-    return core_type in SCORERS
+def has_scorer(core_type: str, instance: dict | None = None) -> bool:
+    from .hard import find_kind
+
+    return core_type in SCORERS or (instance is not None and find_kind(instance) is not None)
 
 
 def compute_score(core_type: str, instance: dict, solution: Any) -> float | None:
     """core_type に対応するスコア計算を実行。未登録の場合は None を返す。"""
+    from .hard import find_kind
+
+    hard_kind = find_kind(instance)
+    if hard_kind is not None:
+        # 大規模問題集は検証器が目的値を再計算する。申告値は使わない。
+        try:
+            cost = hard_kind.check(instance, solution).get("cost")
+        except Exception:
+            return None
+        return None if cost is None else -float(cost)
     fn = SCORERS.get(core_type)
     if fn is None:
         return None

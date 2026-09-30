@@ -37,6 +37,7 @@ VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
 EXCLUDE_TEMPLATED_DIRS="${EXCLUDE_TEMPLATED_DIRS:-}"
 SYSTEM_PREFIX_FILE="${SYSTEM_PREFIX_FILE:-}"
 EVAL_TIMEOUT="${EVAL_TIMEOUT:-600}"
+EXEC_TIMEOUT="${EXEC_TIMEOUT:-60}"
 HANDOVER_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 ROOT_DIR="$(cd "$HANDOVER_DIR/../.." && pwd)"
 RUN_NAME="${RUN_NAME:-solver-eval-$(date +%Y%m%d)}"
@@ -135,7 +136,7 @@ for data_dir in $DATA_DIRS; do
         --label "$LABEL" \
         --run-name "$RUN_NAME-$tag" \
         --max-tokens "$MAX_TOKENS" --extra-body "$EXTRA_BODY" \
-        --concurrency "$CONCURRENCY" --timeout "$EVAL_TIMEOUT" "${dir_args[@]}" $EVAL_ARGS 2>&1 | tee "$LOG_DIR/eval-$tag.log" || status=$?
+        --concurrency "$CONCURRENCY" --timeout "$EVAL_TIMEOUT" --exec-timeout "$EXEC_TIMEOUT" "${dir_args[@]}" $EVAL_ARGS 2>&1 | tee "$LOG_DIR/eval-$tag.log" || status=$?
 done
 echo "[$(date +%T)] done (status=$status)"
 exit "$status"

@@ -46,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--timeout", type=int, default=600)
+    parser.add_argument("--exec-timeout", type=float, default=60.0, help="solve() の実行打ち切り秒数")
     parser.add_argument("--limit", type=int, help="先頭 N 問だけ（動作確認用）")
     parser.add_argument(
         "--system-prefix-file",
@@ -156,7 +157,7 @@ def solve_one(args: argparse.Namespace, instruction: str, example: dict) -> dict
         core_type=example["core_type"],
         instance_id=example["instance_id"],
         registry=registry,
-        timeout=60.0,
+        timeout=args.exec_timeout,
         reference_value=example.get("reference_value"),
         reference_solution=example.get("reference_solution", {}),
         objective_text=example.get("objective", ""),

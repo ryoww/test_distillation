@@ -39,6 +39,8 @@ SHARDS="${SHARDS:-4}"
 # 出力枠は思考と本文の合計。Qwen3.8 は 32768 では思考が切れるので 65536 を既定にする。
 MAX_TOKENS="${MAX_TOKENS:-65536}"
 LM_TIMEOUT="${LM_TIMEOUT:-5400}"
+# 生成コードの実行打ち切り。data/problems_hard は問題文に 600 秒と書いてあるので揃える。
+EXEC_TIMEOUT="${EXEC_TIMEOUT:-60}"
 READY_TIMEOUT_SEC="${READY_TIMEOUT_SEC:-1800}"
 # Why not 固定ポート: 同じノードで複数ジョブが同時に走るので、ジョブ ID で分ける。
 PORT=$((7600 + SLURM_JOB_ID % 100))
@@ -59,7 +61,7 @@ MODEL="$(manifest_field "$ROLE" model_id)"
 REV="$(manifest_field "$ROLE" revision)"
 
 echo "[$(date +%T)] job $SLURM_JOB_ID on $(hostname); GPU: ${CUDA_VISIBLE_DEVICES:-unset}; port $PORT"
-echo "[$(date +%T)] run=$LABEL data=$DATA_DIR shards=$SHARDS model=$MODEL max_tokens=$MAX_TOKENS lm_timeout=$LM_TIMEOUT program=${PROGRAM:-builtin}"
+echo "[$(date +%T)] run=$LABEL data=$DATA_DIR shards=$SHARDS model=$MODEL max_tokens=$MAX_TOKENS lm_timeout=$LM_TIMEOUT exec_timeout=$EXEC_TIMEOUT program=${PROGRAM:-builtin}"
 
 (
     cd "$ROOT_DIR"
@@ -102,6 +104,6 @@ uv run python scripts/compare_prompt_models.py \
     --data-dir "$DATA_DIR" --run-name "$LABEL" \
     --only-model "$MODEL_LABEL" --only-prompt "$PROMPT" "${EXTRA[@]}" \
     "$API_FLAG" "http://127.0.0.1:$PORT/v1" \
-    --max-tokens "$MAX_TOKENS" --lm-timeout "$LM_TIMEOUT" \
+    --max-tokens "$MAX_TOKENS" --lm-timeout "$LM_TIMEOUT" --exec-timeout "$EXEC_TIMEOUT" \
     --parallel --shards "$SHARDS" 2>&1 | tee "$LOG_DIR/compare.log"
 echo "[$(date +%T)] done: outputs/prompt_model_comparisons/$LABEL/"

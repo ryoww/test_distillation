@@ -287,6 +287,7 @@ def evaluate(
     name="Test",
     use_reference=True,
     max_repair_attempts=1,
+    exec_timeout=60.0,
 ):
     """評価: 各インスタンスに対してアルゴリズムを生成してスコアを計算。
 
@@ -326,6 +327,7 @@ def evaluate(
                     core_type=core_type,
                     instance=instance,
                     max_attempts=max_repair_attempts,
+                    timeout=exec_timeout,
                     return_schema=return_schema,
                 )
                 repair = summarize_attempts(attempts)
@@ -351,6 +353,7 @@ def evaluate(
             reference_solution=ref_sol,
             objective_text=objective_text,
             use_reference=use_reference,
+            timeout=exec_timeout,
         )
 
         score = result["score"]
@@ -514,6 +517,12 @@ def parse_args(argv=None):
         help="1 keeps single-shot generation. 2+ verifies the solution and asks for a fix.",
     )
     parser.add_argument(
+        "--exec-timeout",
+        type=float,
+        default=60.0,
+        help="生成した solve() の実行を打ち切る秒数（大規模問題では問題文の上限と揃える）",
+    )
+    parser.add_argument(
         "--no-thinking",
         dest="enable_thinking",
         action="store_const",
@@ -649,6 +658,7 @@ def main(argv=None):
                 name="Test",
                 use_reference=use_reference,
                 max_repair_attempts=args.max_repair_attempts,
+                exec_timeout=args.exec_timeout,
             )
         else:
             logger.error(f"No compiled program found at {program_path}. Run without --eval-only.")
@@ -690,6 +700,7 @@ def main(argv=None):
             name="Test",
             use_reference=use_reference,
             max_repair_attempts=args.max_repair_attempts,
+            exec_timeout=args.exec_timeout,
         )
 
     results_path = run_dir / f"evaluation_results_v3_gepa_{out_tag}.json"

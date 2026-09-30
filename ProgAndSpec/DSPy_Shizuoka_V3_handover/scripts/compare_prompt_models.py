@@ -130,6 +130,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--run-name")
     parser.add_argument("--max-tokens", type=_positive_int, default=65536)
     parser.add_argument("--lm-timeout", type=_positive_int, default=5400)
+    parser.add_argument(
+        "--exec-timeout",
+        type=_positive_int,
+        default=60,
+        help="生成コードの実行打ち切り秒数。大規模問題は問題文に書いた上限と揃える",
+    )
     parser.add_argument("--temperature", type=_nonnegative_float, default=0.0)
     parser.add_argument(
         "--only-model",
@@ -511,6 +517,8 @@ def _build_command(job: EvaluationJob, args: argparse.Namespace, run_root: Path)
         str(args.max_tokens),
         "--lm-timeout",
         str(args.lm_timeout),
+        "--exec-timeout",
+        str(args.exec_timeout),
         "--temperature",
         str(args.temperature),
     ]

@@ -673,7 +673,7 @@ def evaluate_algorithm_v3(
     # PRIORITY: registered scorer with self-computation (catches fake cost=0)
     # If scorer returns None, try generic reference-guided scorer
     cost = None
-    if has_scorer(core_type):
+    if has_scorer(core_type, instance):
         score_val = compute_score(core_type, instance, result)
         if score_val is not None:
             cost = -score_val  # Higher score = lower cost (minimization convention)
