@@ -647,3 +647,23 @@ LABEL=ministral3_14b_reasoning MODEL_PATH=mistralai/Ministral-3-14B-Reasoning-25
 - Qwen3.8 は思考が `max_tokens` 32,768 を使い切って本文が空になる問題が 140 問中 21〜35 問
   あります。65,536 にすると 4〜13 問に減り、Qwen3.6 との差の大半が消えます
   （`RESCORE_REPORT.md` 14〜15 章）。Qwen3.8 を含む比較では `MAX_TOKENS=65536` を使ってください。
+
+## 11. 大規模問題集（data/problems_hard）
+
+`data_hard.zip` / `data_hard2.zip` の問題は `scripts/import_hard_problems.py` で `data/problems_hard/prob_301〜330`
+に取り込みます。参照解はヒューリスティック解なので `objective_value` と解の構造だけを `reference_solution` に置き、
+下界・手法・最適性は `reference_meta` に残します。zip が途中で切れていても読める分だけ復元します。
+壊れた参照値の置き換え（prob_328 の生産費二重計上）は同スクリプトの `REFERENCE_OVERRIDES` にあります。
+
+- 採点は `src/utils/hard/` の検証器が行います。core_type ではなく instance の形で種別を判定し、申告値を使わず
+  目的値を再計算します（`RESCORE_REPORT.md` 24 章）。新しい種別を足すときは `register_kind` で登録し、
+  同梱参照解が `objective_value` を再現するテストを `tests/test_hard_<群>.py` に置きます。
+- 問題文に書いた実行上限（600 秒）と採点側の `--exec-timeout` / `EXEC_TIMEOUT` を揃えます。
+  `scripts/slurm_eval_generated_one.sbatch` と `scripts/slurm_eval_solver.sbatch` の既定は 60 秒のままです。
+- 問題文が 2 万トークンを超える問題（ポートフォリオ 2 問）があるので、`slurm_eval_solver.sbatch` では
+  `MAX_MODEL_LEN=81920` 程度が必要です。
+- 文脈なしのモデルに解かせるときは `scripts/export_solver_prompts.py export` で 1 問 1 ファイルの入力を書き、
+  回答を `answers/<prob_id>.py` に置いて `collect` で compare の shard 形式にします。採点は
+  `scripts/rescore_with_checkers.py --data-dir data/problems_hard --timeout 600` です。
+- 再採点は 1 問あたり最大 600 秒かかるので、shard 単位で並列に回します（24 章では 16 並列で約 1 時間）。
+
