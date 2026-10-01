@@ -666,4 +666,6 @@ LABEL=ministral3_14b_reasoning MODEL_PATH=mistralai/Ministral-3-14B-Reasoning-25
   回答を `answers/<prob_id>.py` に置いて `collect` で compare の shard 形式にします。採点は
   `scripts/rescore_with_checkers.py --data-dir data/problems_hard --timeout 600` です。
 - 再採点は 1 問あたり最大 600 秒かかるので、shard 単位で並列に回します（24 章では 16 並列で約 1 時間）。
+- 修復ループは `REPAIR_ATTEMPTS=2`（`--max-repair-attempts`）で有効になります。検証器の違反を見せて書き直させる
+  もので、大規模 28 問では 3 条件とも 2〜3 問しか救えませんでした（`RESCORE_REPORT.md` 25 章）。
 

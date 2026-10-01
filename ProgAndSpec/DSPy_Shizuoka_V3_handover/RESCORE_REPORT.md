@@ -1275,3 +1275,117 @@ MODEL_LABEL=qwen3_8_27b sbatch --export=ALL scripts/slurm_eval_generated_one.sba
 uv run python scripts/rescore_with_checkers.py <run dirs> --data-dir data/problems_hard --timeout 600 \
   --output outputs/prompt_model_comparisons/rescored-hard28-20261001.json
 ```
+
+## 25. 大規模 28 問: 実行上限 1,800 秒と修復ループ、再学習 GEPA（2026-10-01）
+
+### 25.1 条件
+
+24 章の 4 条件（実行上限 600 秒、単発生成）に、次の 3 条件を加えた。問題文の実行上限の記述も 1,800 秒に
+書き換えて再取り込みした（`scripts/import_hard_problems.py --exec-timeout 1800`）。
+
+| 条件 | 指示文 | 実行上限 | 修復ループ | 所要（GPU 1 枚） |
+|---|---|---:|---|---|
+| Qwen3.8 · compact · 修復 | compact | 1,800 秒 | 2 回（検証器の違反を見せて書き直し） | Slurm 781、2 時間 00 分 |
+| Qwen3.8 · 再学習 GEPA · 修復 | 18 章の再学習 GEPA（33.9KB） | 1,800 秒 | 2 回 | Slurm 782、2 時間 27 分 |
+| Qwen3.6 · compact · 修復 | compact | 1,800 秒 | 2 回 | Slurm 783、4 時間 11 分 |
+
+修復ループは `src/verify_loop.py` のもので、1 回目の解を実行し、検証器が違反を報告したら違反一覧を見せて
+書き直させる（参照値は見せない）。検証器が形を読めない解（unverified）は違反なしとして通す。
+途中で見つけた不具合を 1 つ直した: 書き直しの LM 呼び出しが空応答で失敗すると 1 回目の解まで捨てて
+gen_error にしていた（Qwen3.8 compact の 2 問が該当）。今は 1 回目の解を残す（`79d766c`）。
+
+採点は 24 章の検証器をさらに広げた最終版で、7 条件すべてを同じ採点系で再採点した
+（`rescored-hard28-final-20261001.json`）。追加で読めるようにした形は、生産量だけの計画、看護師の一部しか
+載っていない勤務表（載っていない人は全日 off として不足を計上）、開設も流量もない網設計（全需要未充足の
+違反）、品目 id だけのストリップなど。読めない解は凡例のない整数コードの勤務表だけになった。
+
+### 25.2 結果（28 問）
+
+| 条件 | 平均スコア | 可行（厳密） | 参照以上 | 参照より悪い | 制約違反・形式不備 | 実行エラー/超過 | 生成失敗 | 未検証 | 中央 gap |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Qwen3.6 · compact（600 秒、24 章） | 0.289 | 4 | 2 | 2 | 20 | 2 | 1 | 1 | +148% |
+| Qwen3.6 · compact · 修復 | 0.334 | 6 | 2 | 4 | 15 | 3 | 0 | 4 | +29% |
+| Qwen3.8 · compact（600 秒、24 章） | 0.440 | 11 | 5 | 6 | 13 | 4 | 0 | 0 | +8.5% |
+| Qwen3.8 · compact · 修復 | 0.519 | 12 | 5 | 7 | 10 | 3 | 2 | 1 | +7.5% |
+| Qwen3.8 · 再学習 GEPA · 修復 | 0.559 | 10 | 5 | 5 | 17 | 1 | 0 | 0 | +1.1% |
+| Gemma 4 12B（600 秒、24 章） | 0.291 | 5 | 1 | 4 | 16 | 5 | 0 | 2 | +7.4% |
+| Fable 5.1 文脈なし（24 章） | 1.497 | 22 | 17 | 5 | 4 | 2 | 0 | 0 | −12% |
+
+修復ループの発動状況（1 回目の解を検証器が通した / 書き直しで通った / 書き直しても通らなかった）:
+
+| 条件 | 1 回目で通過 | 書き直しで通過 | 書き直しても不通 |
+|---|---:|---:|---:|
+| Qwen3.6 · compact · 修復 | 8 | 2 | 18 |
+| Qwen3.8 · compact · 修復 | 11 | 2 | 13（+2 は書き直し失敗で解消失） |
+| Qwen3.8 · 再学習 GEPA · 修復 | 13 | 3 | 12 |
+
+問題別:
+
+| id | kind | Q3.6 | Q3.8 | Fable | Gemma 4 | Q3.6 修復 | Q3.8 修復 | Q3.8 GEPA 修復 |
+|---|---|---|---|---|---|---|---|---|
+| prob_301 | clsp | 違反 | 違反 | +6.6% | 未検証 | 違反 | 実行エラー | 違反 |
+| prob_302 | crew_pairing | +270.3% | +335.0% | +5.4% | 実行エラー | +180.6% | +59.3% | -2.0% |
+| prob_303 | vrptw_md | 違反 | +97.3% | -51.5% | 違反 | +149.9% | -35.4% | +149.5% |
+| prob_304 | facility_multi | 違反 | 違反 | -38.1% | 違反 | 違反 | 生成失敗 | 違反 |
+| prob_305 | fjsp | 違反 | +8.5% | +1.0% | +26.5% | +28.8% | +9.7% | +13.0% |
+| prob_306 | nurse_roster | 違反 | 違反 | 違反 | 未検証 | 違反 | 未検証 | 違反 |
+| prob_307 | cutting_1d | 違反 | 違反 | +0.6% | 実行エラー | +5.1% | 違反 | +1.1% |
+| prob_308 | mcnd | -17.6% | 実行エラー | 実行エラー | 違反 | 違反 | 実行エラー | -44.4% |
+| prob_311 | clsp | +148.4% | +82.0% | -9.5% | 実行エラー | 実行エラー | 違反 | 実行エラー |
+| prob_312 | crew_pairing | -32.5% | 実行エラー | -39.9% | -31.7% | 違反 | +242.0% | -6.4% |
+| prob_313 | vrptw_md | 生成失敗 | 実行エラー | -64.1% | +8.7% | 違反 | +74.8% | +57.3% |
+| prob_314 | facility_multi | 違反 | 違反 | -19.9% | 違反 | 違反 | 違反 | 違反 |
+| prob_315 | fjsp | 実行エラー | -24.0% | -26.4% | +7.4% | -5.6% | -17.7% | -14.7% |
+| prob_316 | nurse_roster | 違反 | 違反 | -40.5% | 違反 | 違反 | 違反 | 違反 |
+| prob_317 | cutting_1d | 違反 | -1.6% | +0.5% | 実行エラー | 実行エラー | +7.5% | +29.0% |
+| prob_318 | mcnd | 違反 | -5.9% | -68.6% | +0.4% | 未検証 | -59.4% | 違反 |
+| prob_319 | portfolio | 違反 | +42.8% | 違反 | 違反 | -0.9% | +7.1% | 違反 |
+| prob_320 | prp | 違反 | 違反 | -11.6% | 違反 | 未検証 | 違反 | 違反 |
+| prob_321 | pdptw | 違反 | 違反 | -9.9% | 実行エラー | 未検証 | -6.9% | 違反 |
+| prob_322 | fjsp_setup | 違反 | 実行エラー | -12.1% | 違反 | 違反 | 違反 | -8.7% |
+| prob_323 | role_roster | 未検証 | 違反 | -2.6% | 違反 | 違反 | 違反 | 違反 |
+| prob_324 | cutting_2d | 違反 | -23.5% | -52.8% | 違反 | 実行エラー | -46.9% | 違反 |
+| prob_325 | mcnd_surv | 実行エラー | -4.3% | -8.6% | 違反 | 違反 | 違反 | 違反 |
+| prob_326 | portfolio_cvar | 違反 | 違反 | 違反 | 違反 | 違反 | 生成失敗 | 違反 |
+| prob_327 | prp_tw | 違反 | +106.7% | -40.5% | 違反 | 違反 | 違反 | 違反 |
+| prob_328 | facility_2ech | 違反 | 違反 | -79.8% | 違反 | 違反 | 実行エラー | 違反 |
+| prob_329 | facility_robust | 違反 | 違反 | 実行エラー | 違反 | 違反 | 違反 | 違反 |
+| prob_330 | crew_pairing_seniority | 違反 | 違反 | 違反 | 違反 | 未検証 | +499.0% | 違反 |
+
+
+### 25.3 読み方
+
+- **実行上限の延長と修復ループの効果は小さい。** Qwen3.8 compact で可行 11 → 12、Qwen3.6 で 4 → 6。
+  書き直しで通った問題は 3 条件とも 2〜3 問で、書き直しても通らない問題が 12〜18 問ある。違反一覧を
+  見せても、容量超過や未割当を直せないか、直す過程で別の違反を作っている。超過は 1,800 秒でも残る
+  （Qwen3.6 修復で 3 問）。時間を与えても使い切れていないので、上限がボトルネックではない。
+- **再学習 GEPA は Qwen3.8 で最も良い平均（0.559）だが、可行数は compact 修復より少ない（10 対 12）。**
+  利得の中身は 24 章の 140 問と同じで、超過と実行エラーが 1 問に減り（compact 修復は 3 問）、可行解の
+  gap が中央 +1% まで縮んだこと。一方で制約違反が 17 問と最も多く、空の計画や 1 人分の勤務表のような
+  「形式は整っているが中身のない解」を返す問題が増えた。GEPA の規則は返却形式を守らせる方向に効き、
+  規模に見合う探索を書かせる方向には効いていない。
+- **GEPA による向上は、この問題集では「有意」とは言えない。** 平均 +0.04、可行 −2 問で、28 問の
+  対比較では信頼区間が 0 を大きく跨ぐ（paired bootstrap: +0.04 [−0.39, +0.46]）。140 問での +0.12 は学習で
+  見た種別の未知 instance に対するもので、20 種別すべてが未知のここでは再現しない。
+- **モデル差は変わらない。** 7 条件を通じて、文脈なしの Fable（可行 22、参照以上 17）と Qwen3.8
+  （最良で可行 12、参照以上 5）の間の差は、実行時間・修復・指示文のどれでも埋まらない。
+
+### 25.4 含意
+
+プロンプト側（指示文、修復、時間）で動く余地は、この規模の問題では 1〜2 問分しかない。残る差は
+「規模に応じた手法選択」と「空解を返さず最後まで解く」というモデルの能力差で、学習で埋めるなら
+Fable と Qwen3.8 の可行解（計 34 解）を教師にした SFT が候補になる。ただし 23 章までの雛形方式は
+使えない（新 instance の厳密解が作れない）ので、同じ instance での再検証にとどまる。
+
+### 25.5 再現
+
+```bash
+cd ProgAndSpec/DSPy_Shizuoka_V3_handover
+uv run python scripts/import_hard_problems.py data/raw_hard/data_hard.zip data/raw_hard/data_hard2.zip --exec-timeout 1800
+export QWEN_HF_HOME=... QWEN_VLLM_ENV=... RUN_NAME=hard28-repair-20261001 DATA_DIR=data/problems_hard \
+       SHARDS=7 EXEC_TIMEOUT=1800 REPAIR_ATTEMPTS=2
+MODEL_LABEL=qwen3_8_27b PROMPT=compact PROGRAM=prompts/compiled_program_v3_compact.json sbatch --export=ALL scripts/slurm_eval_generated_one.sbatch
+MODEL_LABEL=qwen3_8_27b PROMPT=gepa_compact PROGRAM=prompts/compiled_program_v3_gepa_compact.json sbatch --export=ALL scripts/slurm_eval_generated_one.sbatch
+MODEL_LABEL=qwen3_6_27b PROMPT=compact PROGRAM=prompts/compiled_program_v3_compact.json sbatch --export=ALL scripts/slurm_eval_generated_one.sbatch
+uv run python scripts/rescore_with_checkers.py <run dirs> --data-dir data/problems_hard --timeout 1800 --output outputs/prompt_model_comparisons/rescored-hard28-final-20261001.json
+```
