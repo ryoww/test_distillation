@@ -42,48 +42,91 @@ def _is_num(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def _id_list(value: Any, valid: set[int]) -> set[int] | None:
-    """id のリストを集合に読む。未知の id や型違いは None。"""
+def _to_int(value: Any) -> int | None:
+    """整数、または "12" のような整数文字列を int に読む。それ以外は None。"""
+    if _is_num(value) and int(value) == value:
+        return int(value)
+    if isinstance(value, str) and re.fullmatch(r"\s*-?\d+\s*", value):
+        return int(value)
+    return None
+
+
+def _id_list(value: Any, valid: set[int], violations: list[str], label: str) -> set[int] | None:
+    """id のリストを集合に読む。型違いは None。未知の id は違反として報告し、集合から外す。
+
+    Why not 未知 id を unverified: 0 始まりの id 規約違いなどは意味が一意に取れるので、
+    推測で補正せず「存在しない id」としてそのまま違反に積む。
+    """
     if not isinstance(value, list):
         return None
     ids = set()
     for item in value:
-        if not _is_num(item) or int(item) != item or int(item) not in valid:
+        k = _to_int(item)
+        if k is None:
             return None
-        ids.add(int(item))
+        if k not in valid:
+            violations.append(f"{label} {k} is not a known id")
+            continue
+        ids.add(k)
     return ids
 
 
-def _id_map(value: Any, keys: set[int], values: set[int]) -> dict[int, int] | None:
-    """{顧客 id: 施設 id} 形式の割当を読む。キー・値とも既知 id でなければ None。"""
+def _id_map(value: Any, keys: set[int], violations: list[str], label: str) -> dict[int, int] | None:
+    """{顧客 id: 施設 id} 形式の割当を読む。キー・値とも整数でなければ None。
+
+    未知のキーは違反として報告して捨てる。値の妥当性（既知か、開設済みか）は呼び出し側が
+    検査するので、ここでは整数であることだけを見る。
+    """
     if not isinstance(value, dict):
         return None
     out: dict[int, int] = {}
     for key, item in value.items():
-        try:
-            k = int(key)
-        except (TypeError, ValueError):
+        k, v = _to_int(key), _to_int(item)
+        if k is None or v is None:
             return None
-        if k not in keys or not _is_num(item) or int(item) != item or int(item) not in values:
-            return None
-        out[k] = int(item)
+        if k not in keys:
+            violations.append(f"{label} refers to unknown id {k}")
+            continue
+        out[k] = v
     return out
 
 
-def _plan(value: Any, valid: set[int], periods: int) -> dict[int, list[float]] | None:
-    """{施設 id: [期別の量]} 形式の計画を読む。長さや型が合わなければ None。"""
+# record 形式の計画で施設 id と期別の量を持つキーの候補。
+_PLAN_ID_KEYS = ("facility", "facility_id", "id")
+_PLAN_QTY_KEYS = ("plan", "quantities", "amounts", "values", "periods")
+
+
+def _plan(
+    value: Any, valid: set[int], periods: int, violations: list[str], label: str
+) -> dict[int, list[float]] | None:
+    """{施設 id: [期別の量]} 形式の計画を読む。長さや型が合わなければ None。
+
+    [{"facility": id, "plan": [...]}, ...] の record 形式も同じ dict に組み直す。
+    空のリストは「計画なし」として空の dict に読む。
+    """
+    if isinstance(value, list):
+        records = {}
+        for rec in value:
+            if not isinstance(rec, dict):
+                return None
+            id_key = next((k for k in _PLAN_ID_KEYS if k in rec), None)
+            qty_key = next((k for k in _PLAN_QTY_KEYS if k in rec), None)
+            if id_key is None or qty_key is None:
+                return None
+            records[rec[id_key]] = rec[qty_key]
+        value = records
     if not isinstance(value, dict):
         return None
     out: dict[int, list[float]] = {}
     for key, item in value.items():
-        try:
-            k = int(key)
-        except (TypeError, ValueError):
-            return None
-        if k not in valid or not isinstance(item, list) or len(item) != periods:
+        k = _to_int(key)
+        if k is None or not isinstance(item, list) or len(item) != periods:
             return None
         if not all(_is_num(q) for q in item):
             return None
+        if k not in valid:
+            violations.append(f"{label} refers to unknown facility {k}")
+            continue
         out[k] = [float(q) for q in item]
     return out
 
@@ -107,19 +150,26 @@ def _outflows(
 def _check_assignment(
     customers: list[dict],
     assignment: dict[int, int],
+    pool: set[int],
     opened: set[int],
     cand_key: str,
     violations: list[str],
-) -> None:
-    """全顧客がちょうど 1 つの開設済み候補施設へ割り当てられているかを見る。"""
+) -> dict[int, int]:
+    """全顧客がちょうど 1 つの開設済み候補施設へ割り当てられているかを見る。
+
+    未知の施設への割当は違反として報告し、以降の集計で使えるよう既知の施設への割当だけを返す。
+    """
     for c in customers:
         f = assignment.get(c["id"])
         if f is None:
             violations.append(f"customer {c['id']} is not assigned")
+        elif f not in pool:
+            violations.append(f"customer {c['id']} assigned to unknown facility {f}")
         elif f not in c[cand_key]:
             violations.append(f"customer {c['id']} assigned to non-candidate {f}")
         elif f not in opened:
             violations.append(f"customer {c['id']} assigned to closed facility {f}")
+    return {k: v for k, v in assignment.items() if v in pool}
 
 
 def _declared_mismatch(solution: dict, cost: float, violations: list[str]) -> None:
@@ -198,19 +248,25 @@ def _check_multi(instance: dict, solution: Any) -> dict:
     customers = instance["customers"]
     periods = int(instance["num_periods"])
     rate = float(instance["safety_stock_rate"])
-    opened = _id_list(solution.get("opened_facilities"), set(facilities))
+    violations: list[str] = []
+    opened = _id_list(solution.get("opened_facilities"), set(facilities), violations, "facility")
     assignment = _id_map(
-        solution.get("customer_assignment"), {c["id"] for c in customers}, set(facilities)
+        solution.get("customer_assignment"), {c["id"] for c in customers}, violations, "assignment"
     )
-    procurement = _plan(solution.get("procurement_plan"), set(facilities), periods)
-    inventory = _plan(solution.get("inventory_plan"), set(facilities), periods)
+    procurement = _plan(
+        solution.get("procurement_plan"), set(facilities), periods, violations, "procurement_plan"
+    )
+    inventory = _plan(
+        solution.get("inventory_plan"), set(facilities), periods, violations, "inventory_plan"
+    )
     if opened is None or assignment is None:
         return _unverified("opened_facilities / customer_assignment are not readable")
     if procurement is None or inventory is None:
         return _unverified("procurement_plan / inventory_plan are not readable")
 
-    violations: list[str] = []
-    _check_assignment(customers, assignment, opened, "candidate_facilities", violations)
+    assignment = _check_assignment(
+        customers, assignment, set(facilities), opened, "candidate_facilities", violations
+    )
     out = _outflows(customers, assignment, periods)
     # 計画の各期を検査する。計画がない開設拠点は調達も在庫も 0 として扱う。
     for fid in sorted(set(procurement) | set(inventory) | opened):
@@ -260,15 +316,17 @@ def _check_robust(instance: dict, solution: Any) -> dict:
     customers = instance["customers"]
     periods = int(instance["num_periods"])
     rate = float(instance["safety_stock_rate"])
-    opened = _id_list(solution.get("opened_facilities"), set(facilities))
+    violations: list[str] = []
+    opened = _id_list(solution.get("opened_facilities"), set(facilities), violations, "facility")
     assignment = _id_map(
-        solution.get("customer_assignment"), {c["id"] for c in customers}, set(facilities)
+        solution.get("customer_assignment"), {c["id"] for c in customers}, violations, "assignment"
     )
     if opened is None or assignment is None:
         return _unverified("opened_facilities / customer_assignment are not readable")
 
-    violations: list[str] = []
-    _check_assignment(customers, assignment, opened, "candidate_facilities", violations)
+    assignment = _check_assignment(
+        customers, assignment, set(facilities), opened, "candidate_facilities", violations
+    )
     coef = _coef(instance.get("transport_cost_formula"), 0.05)
     open_cost = sum(facilities[fid]["open_cost"] for fid in opened)
     scenario_costs = []
@@ -325,23 +383,29 @@ def _check_2ech(instance: dict, solution: Any) -> dict:
     customers = instance["customers"]
     periods = int(instance["num_periods"])
     rate = float(instance["safety_stock_rate"])
-    opened_plants = _id_list(solution.get("opened_plants"), set(plants))
-    opened_dcs = _id_list(solution.get("opened_dcs"), set(dcs))
-    dc_plant = _id_map(solution.get("dc_plant_assignment"), set(dcs), set(plants))
+    violations: list[str] = []
+    opened_plants = _id_list(solution.get("opened_plants"), set(plants), violations, "plant")
+    opened_dcs = _id_list(solution.get("opened_dcs"), set(dcs), violations, "DC")
+    dc_plant = _id_map(
+        solution.get("dc_plant_assignment"), set(dcs), violations, "dc_plant_assignment"
+    )
     assignment = _id_map(
-        solution.get("customer_assignment"), {c["id"] for c in customers}, set(dcs)
+        solution.get("customer_assignment"), {c["id"] for c in customers}, violations, "assignment"
     )
     if opened_plants is None or opened_dcs is None:
         return _unverified("opened_plants / opened_dcs are not readable")
     if dc_plant is None or assignment is None:
         return _unverified("dc_plant_assignment / customer_assignment are not readable")
 
-    violations: list[str] = []
-    _check_assignment(customers, assignment, opened_dcs, "candidate_dcs", violations)
+    assignment = _check_assignment(
+        customers, assignment, set(dcs), opened_dcs, "candidate_dcs", violations
+    )
     out = _outflows(customers, assignment, periods)
     for did in sorted(opened_dcs):
         if did not in dc_plant:
             violations.append(f"DC {did} is opened but has no plant")
+        elif dc_plant[did] not in plants:
+            violations.append(f"DC {did} is assigned to unknown plant {dc_plant[did]}")
         elif dc_plant[did] not in opened_plants:
             violations.append(f"DC {did} is assigned to closed plant {dc_plant[did]}")
         ship = out.get(did, [0.0] * periods)

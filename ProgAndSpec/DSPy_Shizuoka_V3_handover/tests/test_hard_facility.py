@@ -208,3 +208,82 @@ def test_shipped_problems_are_not_detected_as_hard_kinds():
     for path in sorted(SHIPPED_DIR.glob("prob_*.json")):
         record = json.loads(path.read_text(encoding="utf-8"))
         assert find_kind(record["instance"]) is None, path.name
+
+
+# ---------------------------------------------------------------- モデルが実際に返した形
+def test_empty_list_plans_are_read_as_no_plan():
+    # qwen3.6 の prob_314 フォールバック: 計画が {} ではなく [] で返る。空計画として読んで違反を積む。
+    record, _, _ = _load("prob_314")
+    solution = {
+        "opened_facilities": [],
+        "customer_assignment": {},
+        "procurement_plan": [],
+        "inventory_plan": [],
+    }
+    result = _check(record, solution)
+    assert result["verified"] and not result["feasible"]
+    assert result["cost"] == 0
+    assert any("customer 1 is not assigned" in v for v in result["violations"])
+
+
+def test_unknown_opened_facility_id_is_a_violation_not_unverified():
+    # gemma の prob_329 フォールバック: 0 始まりの id で開設を申告し、全顧客を施設 1 へ割り当てる。
+    record, _, _ = _load("prob_329")
+    customers = record["instance"]["customers"]
+    solution = {
+        "opened_facilities": [0],
+        "customer_assignment": {str(c["id"]): 1 for c in customers},
+    }
+    result = _check(record, solution)
+    assert result["verified"] and not result["feasible"]
+    assert "facility 0 is not a known id" in result["violations"]
+    assert any("customer 1 assigned to non-candidate 1" in v for v in result["violations"])
+
+
+def test_assignment_to_unknown_facility_is_reported():
+    record, ref, _ = _load("prob_304")
+    broken = copy.deepcopy(ref)
+    broken["customer_assignment"]["1"] = 9999
+    result = _check(record, broken)
+    assert result["verified"]
+    assert "customer 1 assigned to unknown facility 9999" in result["violations"]
+    assert not any("customer 1 is not assigned" in v for v in result["violations"])
+
+
+def test_record_list_plans_read_like_the_reference():
+    record, ref, _ = _load("prob_304")
+    as_records = copy.deepcopy(ref)
+    as_records["procurement_plan"] = [
+        {"facility": int(fid), "plan": q} for fid, q in ref["procurement_plan"].items()
+    ]
+    as_records["inventory_plan"] = [
+        {"facility_id": int(fid), "quantities": q} for fid, q in ref["inventory_plan"].items()
+    ]
+    assert _check(record, as_records) == _check(record, ref)
+
+
+def test_string_ids_in_opened_lists_read_like_the_reference():
+    record, ref, _ = _load("prob_328")
+    as_strings = copy.deepcopy(ref)
+    as_strings["opened_plants"] = [str(p) for p in ref["opened_plants"]]
+    as_strings["opened_dcs"] = [str(d) for d in ref["opened_dcs"]]
+    assert _check(record, as_strings) == _check(record, ref)
+
+
+def test_dc_on_unknown_plant_is_reported_for_two_echelon():
+    record, ref, _ = _load("prob_328")
+    broken = copy.deepcopy(ref)
+    dc = ref["opened_dcs"][0]
+    broken["dc_plant_assignment"][str(dc)] = 0
+    result = _check(record, broken)
+    assert result["verified"]
+    assert f"DC {dc} is assigned to unknown plant 0" in result["violations"]
+
+
+def test_plan_for_unknown_facility_is_reported():
+    record, ref, _ = _load("prob_314")
+    broken = copy.deepcopy(ref)
+    broken["inventory_plan"]["0"] = [0.0] * record["instance"]["num_periods"]
+    result = _check(record, broken)
+    assert result["verified"]
+    assert "inventory_plan refers to unknown facility 0" in result["violations"]
