@@ -213,9 +213,12 @@ def test_role_roster_preference_penalty_is_weighted_by_seniority():
     [
         ("prob_302", None),
         ("prob_302", {"pairings": [{"flights": ["x"]}]}),
-        ("prob_330", {"stage1": {"pairings": []}, "stage2": {"assignments": []}}),
+        ("prob_330", {"stage1": {"pairings": []}, "stage2": {"assignments": [{"crew_id": 5}]}}),
+        ("prob_330", {"stage1": {"pairings": [[1], [1]]}, "stage2": {"p0": 1, "p1": 2}}),
         ("prob_306", {"roster": {"1": ["off"] * 28}}),
+        ("prob_306", {"roster": [{"nurse_id": 1, "schedule": ["off"] * 28}]}),
         ("prob_323", {"roster": []}),
+        ("prob_323", {"roster": [{"staff_id": 1, "day": 1, "shift": "off"}]}),
     ],
 )
 def test_unparseable_solution_is_unverified(pid, solution):
@@ -223,6 +226,121 @@ def test_unparseable_solution_is_unverified(pid, solution):
     result = _check(record, solution)
     assert result["verified"] is False
     assert result["cost"] is None
+
+
+def test_empty_pairing_and_assignment_lists_are_read_as_all_uncovered():
+    record = _load("prob_330")
+    result = _check(record, {"stage1": {"pairings": []}, "stage2": {"assignments": []}})
+    assert result["verified"] and result["feasible"]
+    assert result["cost"] == pytest.approx(
+        len(record["instance"]["flights"]) * record["instance"]["uncovered_flight_cost"]
+    )
+
+
+# ---------------------------------------------------------------- モデルが実際に返した形
+@pytest.mark.parametrize("pid", ["prob_306", "prob_316"])
+def test_nurse_roster_reads_list_of_nurse_records(pid):
+    record = _load(pid)
+    reference = _reference(record)
+    expected = _check(record, reference)
+    records = [{"nurse_id": int(k), "schedule": row} for k, row in reference["roster"].items()]
+    result = _check(record, {"roster": records})
+    assert result["verified"] and result["feasible"]
+    assert result["cost"] == pytest.approx(expected["cost"])
+
+
+def test_role_roster_reads_id_schedule_records_without_region():
+    record = _load("prob_323")
+    reference = _reference(record)
+    expected = _check(record, reference)
+    records = [
+        {"id": k, "schedule": [c["state"] for c in row], "shifts": [c["state"] for c in row]}
+        for k, row in reference["roster"].items()
+    ]
+    result = _check(record, {"roster": records})
+    assert result["verified"] and result["feasible"]
+    assert result["cost"] == pytest.approx(expected["cost"])
+
+
+def test_role_roster_reads_per_staff_day_records():
+    record = _load("prob_323")
+    reference = _reference(record)
+    expected = _check(record, reference)
+    records = [
+        {"staff_id": int(k), "day": d, "shift": cell["state"]}
+        for k, row in reference["roster"].items()
+        for d, cell in enumerate(row, 1)
+    ]
+    result = _check(record, {"roster": records})
+    assert result["verified"] and result["feasible"]
+    assert result["cost"] == pytest.approx(expected["cost"])
+
+
+def test_role_roster_falls_back_to_roster_by_staff_key():
+    record = _load("prob_323")
+    reference = _reference(record)
+    expected = _check(record, reference)
+    by_staff = {k: [c["state"] for c in row] for k, row in reference["roster"].items()}
+    result = _check(record, {"roster_by_staff": by_staff})
+    assert result["verified"]
+    assert result["cost"] == pytest.approx(expected["cost"])
+
+
+@pytest.mark.parametrize("pid", ["prob_306", "prob_323"])
+def test_integer_coded_roster_without_legend_stays_unverified(pid):
+    record = _load(pid)
+    people = record["instance"].get("nurses") or record["instance"]["staff"]
+    days = len(record["instance"]["daily_requirements"])
+    result = _check(record, {"roster": {str(p["id"]): [0] * days for p in people}})
+    assert result["verified"] is False
+
+
+def test_crew_pairing_seniority_reads_assignment_records_and_outsourced_flights():
+    record = _load("prob_330")
+    reference = _reference(record)
+    expected = _check(record, reference)
+    stage1 = {
+        "pairings": [
+            {"pairing_id": i, "flights": p["flights"]}
+            for i, p in enumerate(reference["stage1"]["pairings"], 1)
+        ],
+        "outsourced_flights": reference["stage1"]["uncovered_flights"],
+    }
+    stage2 = {
+        "assignments": [
+            {"pairing_id": int(k), "crew_id": a["crew"], "cost": 0}
+            for k, a in reference["stage2"]["assignments"].items()
+        ],
+        "unassigned_pairings": reference["stage2"]["unassigned_pairings"],
+    }
+    result = _check(record, {"stage1": stage1, "stage2": stage2})
+    assert result["verified"] and result["feasible"], result["violations"][:3]
+    assert result["cost"] == pytest.approx(expected["cost"])
+
+
+def test_crew_pairing_seniority_reads_label_keyed_stages():
+    record = _load("prob_330")
+    reference = _reference(record)
+    expected = _check(record, reference)
+    stage1 = {f"p{i}": p["flights"] for i, p in enumerate(reference["stage1"]["pairings"], 1)}
+    stage2 = {f"p{k}": a["crew"] for k, a in reference["stage2"]["assignments"].items()}
+    result = _check(record, {"stage1": stage1, "stage2": stage2})
+    assert result["verified"] and result["feasible"], result["violations"][:3]
+    assert result["cost"] == pytest.approx(expected["cost"])
+
+
+def test_crew_pairing_seniority_assignment_to_unknown_pairing_label_is_a_violation():
+    record = _load("prob_330")
+    flight = record["instance"]["flights"][0]
+    crew = record["instance"]["crews"][0]["id"]
+    assignments = [{"pairing_id": 10, "crew": crew}, {"pairing_id": 11, "crew": crew}]
+    solution = {
+        "stage1": {"pairings": [{"id": 10, "flights": [flight["id"]]}]},
+        "stage2": {"assignments": assignments},
+    }
+    result = _check(record, solution)
+    assert result["verified"]
+    assert any("does not name a stage1 pairing" in v for v in result["violations"])
 
 
 def test_shipped_problems_do_not_match_roster_kinds():

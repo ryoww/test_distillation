@@ -8,6 +8,11 @@
 - nurse_roster: 看護師勤務表（prob_306, prob_316）。`roster[nurse] = 日ごとの状態列`。
 - role_roster: 役割・地域付き勤務表（prob_323）。`roster[staff] = [{state, region}]`。
 目的値は申告値を読まず、instance の費用・ペナルティから再計算する。
+
+解析は「意味が一意に取れる形」まで広げる: record のリスト（`{"nurse_id", "schedule"}` /
+`{"staff_id", "day", "shift"}`）、ラベル付きペアリングと `{"pairing_id", "crew_id"}` 型の割当、
+`{"p0": [便列]}` / `{"p0": クルー}` 型の stage、`outsourced_flights` などの同義キー。
+凡例の無い整数コードの勤務表は状態が決まらないので unverified のまま。
 """
 
 from __future__ import annotations
@@ -50,6 +55,19 @@ def _as_id(x: Any) -> int | None:
     return None
 
 
+def _first(record: dict, keys: tuple[str, ...]) -> Any:
+    """同義キーのうち最初に存在する値（無ければ None）。"""
+    return next((record[k] for k in keys if k in record), None)
+
+
+def _label(x: Any) -> Any:
+    """ペアリング名などのラベル。数値なら int、それ以外は空白を除いた str に寄せる。"""
+    as_int = _as_id(x)
+    if as_int is not None:
+        return as_int
+    return x.strip() if isinstance(x, str) and x.strip() else None
+
+
 def _declared_mismatch(solution: dict, cost: float, *names: str) -> list[str]:
     """申告目的値が再計算値と 0.5% 以上ずれていれば違反として返す。"""
     declared = next((solution[n] for n in names if n in solution), None)
@@ -73,19 +91,62 @@ def _flight_table(instance: dict) -> dict[int, dict] | None:
     return table
 
 
-def _parse_pairings(container: Any, flights: dict[int, dict]) -> list[list[int]] | None:
-    """`pairings` を便 ID のリストの列へ正規化する。読めなければ None。"""
-    if not isinstance(container, dict) or not isinstance(container.get("pairings"), list):
+_PAIRING_LABEL_KEYS = ("id", "pairing_id", "pairing_index", "name")
+_UNCOVERED_KEYS = ("uncovered_flights", "outsourced_flights", "uncovered")
+# stage1 / stage2 の {ラベル: ...} 形を読むとき、ペアリング名とは見なさない予約キー。
+_RESERVED_KEYS = frozenset(_UNCOVERED_KEYS) | {
+    "pairings",
+    "assignments",
+    "unassigned_pairings",
+    "generated_columns",
+    "cost",
+    "num_pairings",
+    "num_uncovered",
+}
+
+
+def _pairing_items(container: Any) -> list[tuple[Any, Any]] | None:
+    """ペアリング集合を [(ラベル, 生のペアリング)] に寄せる。
+
+    `pairings` がリストなら位置 (1 始まり) をラベルにし、要素 dict に id があればそれを優先する。
+    `pairings` が dict、または `pairings` キーが無く全値が便列の dict ({"p0": [...]}) も読む。
+    """
+    if not isinstance(container, dict):
+        return None
+    pairings = container.get("pairings")
+    if isinstance(pairings, dict):
+        return list(pairings.items())
+    if isinstance(pairings, list):
+        items = []
+        for pos, p in enumerate(pairings, 1):
+            explicit = _first(p, _PAIRING_LABEL_KEYS) if isinstance(p, dict) else None
+            items.append((pos if explicit is None else explicit, p))
+        return items
+    plain = pairings is None and container and not (set(container) & _RESERVED_KEYS)
+    if plain and all(isinstance(v, list) for v in container.values()):
+        return list(container.items())
+    return None
+
+
+def _parse_pairings(
+    container: Any, flights: dict[int, dict]
+) -> list[tuple[Any, list[int]]] | None:
+    """ペアリング集合を [(ラベル, 便 ID 列)] へ正規化する。読めなければ None。"""
+    items = _pairing_items(container)
+    if items is None:
         return None
     parsed = []
-    for p in container["pairings"]:
+    for raw_label, p in items:
+        label = _label(raw_label)
         legs = p.get("flights") if isinstance(p, dict) else p
-        if not isinstance(legs, list):
+        if label is None or not isinstance(legs, list):
             return None
         ids = [_as_id(x) for x in legs]
         if any(i is None or i not in flights for i in ids):
             return None
-        parsed.append(ids)
+        parsed.append((label, ids))
+    if len({label for label, _ in parsed}) != len(parsed):
+        return None
     return parsed
 
 
@@ -135,7 +196,7 @@ def _check_pairings(
             violations.append(f"pairing {idx} spans {span:.2f}h > {max_span}")
         cost += _pairing_cost(instance, legs)
     uncovered = set(flights) - set(covered)
-    declared = container.get("uncovered_flights")
+    declared = _first(container, _UNCOVERED_KEYS)
     if isinstance(declared, list):
         declared_ids = {_as_id(x) for x in declared}
         if declared_ids != uncovered:
@@ -158,7 +219,9 @@ def _check_crew_pairing(instance: dict, solution: Any) -> dict:
     pairings = _parse_pairings(solution, flights)
     if pairings is None:
         return _unverified("crew pairing without readable 'pairings'")
-    violations, cost, total = _check_pairings(instance, flights, pairings, solution)
+    violations, cost, total = _check_pairings(
+        instance, flights, [ids for _, ids in pairings], solution
+    )
     violations += _declared_mismatch(solution, cost, "objective_value", "total_cost", "cost")
     return _result(violations, total + 1, cost=cost)
 
@@ -180,18 +243,51 @@ def _crew_table(instance: dict) -> dict[int, dict] | None:
     return table
 
 
-def _parse_assignments(stage2: Any) -> dict[int, tuple[int, list | None]] | None:
-    """`assignments` を {ペアリング番号(1 始まり): (クルー ID, 申告便列)} へ正規化する。"""
-    if not isinstance(stage2, dict) or not isinstance(stage2.get("assignments"), dict):
+_CREW_KEYS = ("crew", "crew_id")
+
+
+def _assignment_items(stage2: Any, labels: set) -> list[tuple[Any, Any]] | None:
+    """割当を [(ペアリングラベル, 生の割当)] に寄せる。
+
+    `assignments` が dict ならキーがラベル。record のリストなら pairing_id / id / pairing
+    (スカラーの場合) がラベル。`assignments` キーが無く、全キーが stage1 のペアリングラベルで
+    値がスカラーの dict ({"p0": 55}) も読む。
+    """
+    if not isinstance(stage2, dict):
+        return None
+    raw = stage2.get("assignments")
+    if isinstance(raw, dict):
+        return list(raw.items())
+    if isinstance(raw, list):
+        items = []
+        for a in raw:
+            if not isinstance(a, dict):
+                return None
+            label = _first(a, ("pairing_id", "pairing_index", "id"))
+            if label is None and not isinstance(a.get("pairing"), list):
+                label = a.get("pairing")
+            items.append((label, a))
+        return items
+    plain = raw is None and stage2 and not (set(stage2) & _RESERVED_KEYS)
+    scalar = all(not isinstance(v, (list, dict)) for v in stage2.values())
+    if plain and scalar and {_label(k) for k in stage2} <= labels:
+        return list(stage2.items())
+    return None
+
+
+def _parse_assignments(stage2: Any, labels: set) -> dict[Any, tuple[int, list | None]] | None:
+    """割当を {ペアリングラベル: (クルー ID, 申告便列)} へ正規化する。"""
+    items = _assignment_items(stage2, labels)
+    if items is None:
         return None
     parsed = {}
-    for key, value in stage2["assignments"].items():
-        idx = _as_id(key)
-        crew = _as_id(value.get("crew")) if isinstance(value, dict) else _as_id(value)
-        if idx is None or crew is None:
+    for raw_label, value in items:
+        label = _label(raw_label)
+        crew = _as_id(_first(value, _CREW_KEYS)) if isinstance(value, dict) else _as_id(value)
+        if label is None or crew is None or label in parsed:
             return None
-        legs = value.get("pairing") if isinstance(value, dict) else None
-        parsed[idx] = (crew, legs if isinstance(legs, list) else None)
+        legs = _first(value, ("pairing", "flights")) if isinstance(value, dict) else None
+        parsed[label] = (crew, legs if isinstance(legs, list) else None)
     return parsed
 
 
@@ -206,20 +302,23 @@ def _check_crew_pairing_seniority(instance: dict, solution: Any) -> dict:
     pairings = _parse_pairings(stage1, flights)
     if pairings is None:
         return _unverified("stage1 without readable 'pairings'")
-    assignments = _parse_assignments(stage2)
+    by_label = dict(pairings)
+    assignments = _parse_assignments(stage2, set(by_label))
     if assignments is None:
         return _unverified("stage2 without readable 'assignments'")
-    violations, cost, total = _check_pairings(instance, flights, pairings, stage1)
+    violations, cost, total = _check_pairings(
+        instance, flights, [ids for _, ids in pairings], stage1
+    )
 
     duties: Counter = Counter()
-    for idx, (crew_id, declared_legs) in sorted(assignments.items()):
-        if not 1 <= idx <= len(pairings):
-            violations.append(f"assignment key {idx} does not index a pairing (1-based)")
+    for idx, (crew_id, declared_legs) in sorted(assignments.items(), key=lambda kv: str(kv[0])):
+        if idx not in by_label:
+            violations.append(f"assignment key {idx} does not name a stage1 pairing")
             continue
         if crew_id not in crews:
             violations.append(f"assignment {idx} names unknown crew {crew_id}")
             continue
-        ids = pairings[idx - 1]
+        ids = by_label[idx]
         if declared_legs is not None and [_as_id(x) for x in declared_legs] != ids:
             violations.append(f"assignment {idx} lists flights that differ from pairing {idx}")
         if not ids:
@@ -236,9 +335,9 @@ def _check_crew_pairing_seniority(instance: dict, solution: Any) -> dict:
             violations.append(
                 f"crew {crew_id} has {duties[crew_id]} duties > max_duties {crew['max_duties']}"
             )
-    unassigned = {i for i in range(1, len(pairings) + 1) if i not in assignments}
+    unassigned = set(by_label) - set(assignments)
     declared = stage2.get("unassigned_pairings")
-    if isinstance(declared, list) and {_as_id(x) for x in declared} != unassigned:
+    if isinstance(declared, list) and {_label(x) for x in declared} != unassigned:
         violations.append(
             f"unassigned_pairings lists {len(declared)} pairings but "
             f"{len(unassigned)} are actually unassigned"
@@ -261,15 +360,66 @@ def _person_table(instance: dict, key: str) -> dict[int, dict] | None:
     return table
 
 
+_ROSTER_KEYS = ("roster", "roster_by_staff", "roster_by_nurse", "schedule")
+_PERSON_KEYS = (
+    "nurse_id",
+    "nurse",
+    "staff_id",
+    "staff",
+    "person_id",
+    "person",
+    "employee_id",
+    "employee",
+    "id",
+)
+_ROW_KEYS = ("schedule", "shifts", "days", "states", "roster")
+_STATE_KEYS = ("state", "shift")
+
+
+def _roster_rows_from_records(records: list, days: int) -> dict[Any, list] | None:
+    """record のリストを {人キー: 日ごとの行} に組み直す。
+
+    人ごとの record (`{"nurse_id": 1, "schedule": [...]}`) と、(人, 日) ごとの record
+    (`{"staff_id": 1, "day": 3, "shift": "late"}`) を読む。日は 1 始まりで全日揃っている
+    ことを要求し、欠けがあれば None。
+    """
+    if not records or not all(isinstance(r, dict) for r in records):
+        return None
+    if _first(records[0], _ROW_KEYS) is not None:
+        rows: dict[Any, list] = {}
+        for r in records:
+            pid, row = _first(r, _PERSON_KEYS), _first(r, _ROW_KEYS)
+            if pid is None or not isinstance(row, list) or pid in rows:
+                return None
+            rows[pid] = row
+        return rows
+    if "day" in records[0]:
+        cells: dict[tuple[Any, int], Any] = {}
+        for r in records:
+            pid, day = _first(r, _PERSON_KEYS), _as_id(r.get("day"))
+            if pid is None or day is None or (pid, day) in cells:
+                return None
+            cells[(pid, day)] = r
+        people = {pid for pid, _ in cells}
+        if len(cells) != len(people) * days:
+            return None
+        rows = {pid: [cells.get((pid, d)) for d in range(1, days + 1)] for pid in people}
+        return None if any(None in row for row in rows.values()) else rows
+    return None
+
+
 def _parse_roster(
     solution: Any, people: dict[int, dict], days: int, states: set[str]
 ) -> dict[int, list[tuple[str, Any]]] | None:
     """`roster` を {人 ID: [(state, region or None)] × days} へ正規化する。"""
     if not isinstance(solution, dict):
         return None
-    roster = solution.get("roster")
-    if isinstance(roster, list) and len(roster) == len(people):
-        roster = dict(zip(people, roster))
+    roster = _first(solution, _ROSTER_KEYS)
+    if isinstance(roster, list):
+        rows = _roster_rows_from_records(roster, days)
+        if rows is None and len(roster) == len(people):
+            rows = dict(zip(people, roster))
+        roster = rows
     if not isinstance(roster, dict):
         return None
     parsed = {}
@@ -279,7 +429,7 @@ def _parse_roster(
             return None
         entries = []
         for cell in row:
-            state = cell.get("state") if isinstance(cell, dict) else cell
+            state = _first(cell, _STATE_KEYS) if isinstance(cell, dict) else cell
             region = cell.get("region") if isinstance(cell, dict) else None
             if state not in states:
                 return None
