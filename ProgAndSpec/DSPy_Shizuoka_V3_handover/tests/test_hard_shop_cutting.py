@@ -354,6 +354,35 @@ def test_cutting_2d_reads_strip_item_records_and_sums_repeated_ids():
     assert any("exceeds plate width" in v for v in result["violations"])
 
 
+def test_cutting_2d_reads_bare_item_ids_as_single_item_strips():
+    """strips が品目 id の並び（qwen3_8 の prob_324）なら、各 id を品目 1 個のストリップとして読む。
+
+    縦積み高さ・需要の検査はその読みのまま行い、収まらなければ違反になる。
+    """
+    instance = _load("prob_324")["instance"]
+    kind = find_kind(instance)
+    # 品目 31 (h=1000) + 46 (h=900) は板 1 (高さ 2000) に積める
+    fits = {"stock_id": 1, "plate_size": 3000, "runs": 16, "strips": [31, 46]}
+    canonical = {"stock_id": 1, "runs": 16,
+                 "strips": [{"items": {"31": 1}}, {"items": {"46": 1}}]}
+    got = kind.check(instance, {"patterns": [fits]})
+    want = kind.check(instance, {"patterns": [canonical]})
+    assert got["verified"] is True
+    assert got["cost"] == pytest.approx(want["cost"]) == pytest.approx(16 * 42000)
+    assert got["violations"] == want["violations"]
+    assert not any("exceeds plate height" in v for v in got["violations"])
+    # 品目 45 (h=1200) を 3 本積むと板 1 の高さ 2000 を超える
+    stacked = {"stock_id": 1, "plate_size": 3000, "runs": 6, "strips": [45, "45", 45.0]}
+    result = kind.check(instance, {"patterns": [stacked]})
+    assert result["verified"] is True
+    assert any("stacked strip height 3600.0 exceeds plate height 2000" in v
+               for v in result["violations"])
+    # bool や入れ子リストはストリップとして読めない
+    for bad in (True, [31, 46]):
+        broken = {"stock_id": 1, "runs": 5, "strips": [bad]}
+        assert kind.check(instance, {"patterns": [broken]})["verified"] is False
+
+
 @pytest.mark.parametrize(
     "items",
     [

@@ -353,6 +353,10 @@ def _check_cutting_2d(instance: dict, solution: Any) -> dict:
         strip_keys = []
         stacked = 0.0
         for s_idx, strip in enumerate(strips):
+            # 品目 id だけのストリップ（"strips": [13, 21]）は、その品目 1 個を品目高さで切る
+            # 1 本と読む。[id, count] の組は 2 品目の並びと区別できないので読まない。
+            if _num(strip) or isinstance(strip, str):
+                strip = {"items": {_sid(strip): 1}}
             if not isinstance(strip, dict):
                 return _unverified(f"pattern {idx} strip {s_idx} is not a mapping")
             strip_items = _parse_counts(_pick(strip, "items", "cuts", "counts", "pieces"))
