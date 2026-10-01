@@ -131,6 +131,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=_positive_int, default=65536)
     parser.add_argument("--lm-timeout", type=_positive_int, default=5400)
     parser.add_argument(
+        "--max-repair-attempts",
+        type=_positive_int,
+        default=1,
+        help="1 で単発生成。2 以上で検証器の違反を見せて書き直させる（train_gepa_v3 と同じ）",
+    )
+    parser.add_argument(
         "--exec-timeout",
         type=_positive_int,
         default=60,
@@ -519,6 +525,8 @@ def _build_command(job: EvaluationJob, args: argparse.Namespace, run_root: Path)
         str(args.lm_timeout),
         "--exec-timeout",
         str(args.exec_timeout),
+        "--max-repair-attempts",
+        str(args.max_repair_attempts),
         "--temperature",
         str(args.temperature),
     ]
