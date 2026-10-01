@@ -332,6 +332,41 @@ def test_prp_tw_per_plant_period_series_plan_is_read_only_at_horizon_length():
     assert _check(instance, solution)["verified"] is False
 
 
+@pytest.mark.parametrize("pid", ["prob_320", "prob_327"])
+def test_prp_bare_production_series_per_plant_derives_setup_and_inventory(pid):
+    _record, instance, solution, objective = _load(pid)
+    # 保存解の形: {plant: [期順の生産量]}。段取りと在庫は生産量から導く。
+    by_plant = _plan_by_plant(solution["production_plan"], instance["periods"])
+    solution["production_plan"] = {plant: s["production"] for plant, s in by_plant.items()}
+    _assert_reproduces(instance, copy.deepcopy(solution), objective)
+    solution["production_plan"]["1"].append(0.0)
+    assert _check(instance, solution)["verified"] is False
+    solution["production_plan"]["1"] = ["x"] * instance["periods"]
+    assert _check(instance, solution)["verified"] is False
+
+
+def test_prp_tw_saved_series_solution_is_read_and_its_period_zero_route_is_reported():
+    _record, instance, _solution, _objective = _load("prob_327")
+    # 保存解（gepa_compact / Qwen3.8）から切り出した抜粋: 工場 1 だけの生産列、
+    # {plant: {customer: [期順]}} の割当、0 始まりの期を持つルート。
+    solution = {
+        "production_plan": {"1": [564.0, 557.0, 615.0, 571.0, 579.0, 612.0]},
+        "allocation": {"1": {"1": [10.0, 11.0, 11.0, 14.0, 12.0, 13.0], "9": [15.0] * 6}},
+        "routes": [
+            {"period": 0, "plant": 1, "customers": [1, 9], "quantities": [10.0, 15.0], "load": 25.0},
+            {"period": 2, "plant": 1, "customers": [1, 9], "quantities": [11.0, 15.0], "load": 26.0},
+        ],
+        "objective_value": 0.0,
+        "note": "fallback",
+    }
+    result = _check(instance, solution)
+    assert result["verified"] is True
+    assert result["feasible"] is False
+    assert any("period 0) has an unknown plant or period" in v for v in result["violations"])
+    assert any("allocation differs" in v for v in result["violations"])
+    assert not any("without a setup" in v for v in result["violations"])
+
+
 def test_prp_zero_based_periods_are_reported_as_violations_not_shifted():
     _record, instance, solution, _objective = _load("prob_320")
     for route in solution["routes"]:

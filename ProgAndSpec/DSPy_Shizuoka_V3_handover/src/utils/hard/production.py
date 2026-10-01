@@ -288,9 +288,15 @@ def _distance(a: dict, b: dict, kind: str) -> float:
 
 
 def _prp_plan_records(plan: dict, num_periods: int) -> list[dict] | None:
-    """{plant: {production: [期順], setup: [期順], inventory: [期順]}} を record のリストに展開する。"""
+    """{plant: {production: [期順], setup: [期順], inventory: [期順]}} を record のリストに展開する。
+
+    {plant: [期順の生産量]} だけの形も読む。段取りは生産量 > 0 の期にあり、在庫は収支から
+    一意に導けるので、補助列が無くても意味は決まる。
+    """
     records: list[dict] = []
     for raw_plant, fields in plan.items():
+        if isinstance(fields, list):
+            fields = {"production": fields}
         if not isinstance(fields, dict):
             return None
         production = _positional(_pick(fields, *_QTY_KEYS), num_periods)
