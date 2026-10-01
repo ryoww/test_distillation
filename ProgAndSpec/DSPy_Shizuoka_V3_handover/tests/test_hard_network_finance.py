@@ -264,3 +264,170 @@ def test_cvar_expected_return_below_target_is_reported():
     result = check_feasibility_detailed(record["core_type"], instance, record["ref"])
     assert "expected return" in _messages(result)
     assert "below target 0.2" in _messages(result)
+
+
+# ---------------------------------------------------------------------------
+# 保存解（outputs/rescore_hard）で実際に見られた形
+# ---------------------------------------------------------------------------
+
+
+def _nodes(instance: dict, path: list[int]) -> list[int]:
+    """アーク id 列を同じ経路のノード列に直す。"""
+    arcs = {a["id"]: a for a in instance["arcs"]}
+    return [arcs[path[0]]["from"]] + [arcs[a]["to"] for a in path]
+
+
+def _assert_same_as_reference(record: dict, solution: dict) -> None:
+    expected = _check(record, record["ref"])
+    result = _check(record, solution)
+    assert result["verified"] is True
+    assert result["violations"] == []
+    assert result["cost"] == pytest.approx(expected["cost"])
+
+
+def test_mcnd_reads_records_with_origin_destination_and_nested_paths():
+    # Qwen3.8 / Claude の prob_318: list の要素が {origin, destination, paths: [{path: ノード列, arc_ids, flow}]}
+    record = RECORDS["prob_318"]
+    instance = record["instance"]
+    od_paths = []
+    for index, entries in record["ref"]["od_paths"].items():
+        od = instance["od_demands"][int(index)]
+        od_paths.append(
+            {
+                "origin": od["origin"],
+                "destination": od["destination"],
+                "volume": od["volume"],
+                "path": _nodes(instance, entries[0]["path"]),
+                "paths": [
+                    {"path": _nodes(instance, e["path"]), "arc_ids": e["path"], "flow": e["volume"]}
+                    for e in entries
+                ],
+            }
+        )
+    _assert_same_as_reference(record, dict(record["ref"], od_paths=od_paths))
+
+
+def test_mcnd_reads_node_paths_when_no_arc_ids_are_given():
+    record = RECORDS["prob_318"]
+    instance = record["instance"]
+    od_paths = {
+        index: [{"path": _nodes(instance, e["path"]), "volume": e["volume"]} for e in entries]
+        for index, entries in record["ref"]["od_paths"].items()
+    }
+    _assert_same_as_reference(record, dict(record["ref"], od_paths=od_paths))
+
+
+def test_mcnd_pair_keyed_arc_lists_route_the_whole_pair_demand():
+    # Gemma の prob_318: od_paths が {"origin-destination": [arc ids]}。同じ対の OD はまとめて需要を満たす。
+    record = RECORDS["prob_318"]
+    instance = record["instance"]
+    od_paths: dict[str, list[int]] = {}
+    for index, entries in record["ref"]["od_paths"].items():
+        od = instance["od_demands"][int(index)]
+        od_paths.setdefault(f"{od['origin']}-{od['destination']}", entries[0]["path"])
+    assert len(od_paths) == 290
+    result = _check(record, {"opened_arc_ids": record["ref"]["opened_arc_ids"], "od_paths": od_paths})
+    assert result["verified"] is True
+    # 分流していた OD を 1 本にまとめたので容量超過は出るが、需要の未達と未知の対は出ない。
+    assert "of demand" not in _messages(result)
+    assert "unknown" not in _messages(result)
+
+
+def test_mcnd_zero_based_pair_keys_are_reported_not_corrected():
+    # Qwen3.6 の prob_318: ノード番号を 0 始まりにした "34_9" キー。instance に無い対はそのまま違反にする。
+    record = RECORDS["prob_318"]
+    result = _check(record, {"opened_arc_ids": [240, 385], "od_paths": {"34_9": [240, 385]}})
+    assert result["verified"] is True
+    assert "od_paths names unknown OD pair 34->9" in _messages(result)
+    assert "OD 0 carries 0 of demand 15" in _messages(result)
+
+
+def test_mcnd_reads_flow_distribution_and_checks_conservation():
+    # Qwen3.6 の prob_308: {origin, destination, volume, flow_distribution: {arc_id: 流量}} の list
+    record = RECORDS["prob_308"]
+    instance = record["instance"]
+    od_paths = []
+    for index, entries in record["ref"]["od_paths"].items():
+        od = instance["od_demands"][int(index)]
+        distribution: dict[str, float] = {}
+        for entry in entries:
+            for arc_id in entry["path"]:
+                distribution[str(arc_id)] = distribution.get(str(arc_id), 0.0) + entry["volume"]
+        od_paths.append(dict(od, flow_distribution=distribution))
+    _assert_same_as_reference(record, dict(record["ref"], od_paths=od_paths))
+
+    del od_paths[0]["flow_distribution"][next(iter(od_paths[0]["flow_distribution"]))]
+    result = _check(record, {"opened_arc_ids": record["ref"]["opened_arc_ids"], "od_paths": od_paths})
+    assert "OD 0 flow is unbalanced at node" in _messages(result)
+
+
+def test_mcnd_split_over_paths_without_volumes_is_unverified():
+    record = RECORDS["prob_308"]
+    path = record["ref"]["od_paths"]["0"][0]["path"]
+    result = _check(record, {"opened_arc_ids": path, "od_paths": {"0": [path, path]}})
+    assert result["verified"] is False
+    assert result["violation_count"] == 0
+
+
+def test_mcnd_positional_arc_flows_list_is_checked():
+    # Qwen3.6 の prob_308: arc_flows がアーク順の list
+    record = RECORDS["prob_308"]
+    declared = {int(k): v for k, v in record["ref"]["arc_flows"].items()}
+    arc_flows = [declared.get(a["id"], 0.0) for a in record["instance"]["arcs"]]
+    _assert_same_as_reference(record, dict(record["ref"], arc_flows=arc_flows))
+    arc_flows[0] += 10.0
+    result = _check(record, dict(record["ref"], arc_flows=arc_flows))
+    assert "arc_flows disagrees with od_paths on 1 arcs" in _messages(result)
+
+
+def _surv_records(record: dict) -> list[dict]:
+    """Claude の prob_325 の形: {origin, destination, paths: [{arcs, nodes, flow}, ...]} の list。"""
+    instance = record["instance"]
+    out = []
+    for index, entry in record["ref"]["od_paths"].items():
+        od = instance["od_demands"][int(index)]
+        out.append(
+            {
+                "origin": od["origin"],
+                "destination": od["destination"],
+                "paths": [
+                    {"arcs": entry[k], "nodes": _nodes(instance, entry[k]), "flow": entry["volume_each"]}
+                    for k in ("path1", "path2")
+                ],
+            }
+        )
+    return out
+
+
+def test_surv_reads_paths_records_with_arcs_and_flow():
+    record = RECORDS["prob_325"]
+    solution = {"opened_arc_ids": record["ref"]["opened_arc_ids"], "od_paths": _surv_records(record)}
+    _assert_same_as_reference(record, solution)
+
+
+def test_surv_unequal_split_between_paths_is_reported():
+    record = RECORDS["prob_325"]
+    od_paths = _surv_records(record)
+    od_paths[0]["paths"][0]["flow"] = 50.0
+    od_paths[0]["paths"][1]["flow"] = 24.0
+    result = _check(record, {"opened_arc_ids": record["ref"]["opened_arc_ids"], "od_paths": od_paths})
+    assert "OD 0 splits unequally [50.0, 24.0]" in _messages(result)
+
+
+def test_surv_pair_keyed_node_paths_are_converted_to_arcs():
+    # Gemma の prob_325: {"origin": {"to": destination, "paths": [ノード列, ノード列]}}。無い OD は違反として積む。
+    record = RECORDS["prob_325"]
+    od_paths = {"14": {"to": 2, "paths": [[14, 13, 11, 2], [14, 23, 24, 9, 2]]}}
+    result = _check(record, {"opened_arc_ids": record["ref"]["opened_arc_ids"], "od_paths": od_paths})
+    assert result["verified"] is True
+    assert "OD 0 " not in _messages(result)
+    assert "OD 1 has no paths" in _messages(result)
+
+
+def test_surv_node_path_over_parallel_arcs_is_unverified():
+    # prob_325 ではノード 11→10 に並行アーク 48, 150 があり、ノード列からはどちらか決められない。
+    record = RECORDS["prob_325"]
+    od_paths = {"0": {"paths": [{"nodes": [11, 10]}, {"nodes": [11, 10]}]}}
+    result = _check(record, {"opened_arc_ids": [], "od_paths": od_paths})
+    assert result["verified"] is False
+    assert "parallel arcs" in result["violations"][0]
