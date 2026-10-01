@@ -256,9 +256,8 @@ def test_pdptw_dropped_pair_changes_cost_and_unserved_list():
     assert result["cost"] != pytest.approx(record["reference_solution"]["objective_value"])
 
 
-def test_pdptw_load_counts_cumulative_demand_of_every_stop():
-    # note「積載は累計需要の最大値」: 受取 50 + 配送 40 = 90 が積載量 80 を超える。
-    instance = {
+def _tiny_pdptw() -> dict:
+    return {
         "depots": [
             {"id": 1, "x": 0.0, "y": 0.0, "open_time": 6.0, "close_time": 20.0, "fleet": {"van": 1}}
         ],
@@ -282,7 +281,97 @@ def test_pdptw_load_counts_cumulative_demand_of_every_stop():
         "unserved_penalty": 1000,
         "note": "precedence: pickup 訪問後に delivery 訪問; 積載は累計需要の最大値",
     }
-    solution = {"routes": [{"depot": 1, "vehicle_type": "van", "stops": [[1, "pickup"], [1, "delivery"]]}]}
-    result = find_kind(instance).check(instance, solution)
+
+
+def _pdptw_route(stops: list) -> dict:
+    return {"routes": [{"depot": 1, "vehicle_type": "van", "stops": stops}]}
+
+
+def test_pdptw_load_counts_cumulative_demand_of_every_stop():
+    # note「積載は累計需要の最大値」: 受取 50 + 配送 40 = 90 が積載量 80 を超える。
+    instance = _tiny_pdptw()
+    result = find_kind(instance).check(instance, _pdptw_route([[1, "pickup"], [1, "delivery"]]))
     _assert_violation(result, "exceeds capacity")
     assert result["cost"] == pytest.approx(100 + 20)
+
+
+# ----------------------------------------------------------------------------
+# pdptw: モデルが実際に返した停留所の形（保存解からの抜粋）
+# ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "stops",
+    [
+        # Qwen3.8: "P<id>" / "D<id>" の文字列
+        ["P1", "D1"],
+        ["pickup_1", "delivery-1"],
+        # Claude: pair_id キーと座標・到着時刻などの付随キーを持つ dict
+        [
+            {"pair_id": 1, "type": "pickup", "x": 5.0, "y": 0.0, "arrival_time": 6.5, "load_after": 50},
+            {"pair_id": 1, "type": "delivery", "x": 10.0, "y": 0.0, "arrival_time": 7.0, "load_after": 90},
+        ],
+        # Qwen3.6: 先頭と末尾にデポ id、停留所は "P<id>" / "D<id>"
+        [1, "P1", "D1", 1],
+        # 数値 id が文字列化されている
+        [["1", "pickup"], ["1", "delivery"]],
+    ],
+)
+def test_pdptw_reads_observed_stop_forms_as_the_reference_form(stops):
+    instance = _tiny_pdptw()
+    reference = find_kind(instance).check(instance, _pdptw_route([[1, "pickup"], [1, "delivery"]]))
+    result = find_kind(instance).check(instance, _pdptw_route(stops))
+    assert result["verified"] is True
+    assert result["violations"] == reference["violations"]
+    assert result["cost"] == pytest.approx(reference["cost"])
+
+
+def test_pdptw_observed_depot_markers_do_not_hide_precedence_errors():
+    # デポ印を外した後の順序で precedence を見る: D が先なら違反。
+    instance = _tiny_pdptw()
+    result = find_kind(instance).check(instance, _pdptw_route([1, "D1", "P1", 1]))
+    assert result["verified"] is True
+    _assert_violation(result, "pickup must precede delivery")
+
+
+@pytest.mark.parametrize(
+    "stops",
+    [
+        [1, "P1", 1, "D1", 1],  # 途中の裸の数値は受取か配送か決まらない
+        [2, "P1", "D1", 2],  # 端でもデポ id と一致しない裸の数値は pair id かもしれない
+        [{"pair_id": 1, "x": 5.0}, {"pair_id": 1, "x": 10.0}],  # kind が無い
+        ["X1", "Y1"],
+    ],
+)
+def test_pdptw_stops_without_a_unique_meaning_stay_unverified(stops):
+    instance = _tiny_pdptw()
+    result = find_kind(instance).check(instance, _pdptw_route(stops))
+    assert result["verified"] is False
+    assert result["violation_count"] == 0
+
+
+def test_pdptw_unknown_pair_id_in_observed_form_is_a_violation_not_unverified():
+    # 0 始まりなど id 規約のずれは推測で補正せず、そのまま違反として報告する。
+    instance = _tiny_pdptw()
+    result = find_kind(instance).check(instance, _pdptw_route(["P0", "D0"]))
+    assert result["verified"] is True
+    _assert_violation(result, "unknown stop")
+
+
+@pytest.mark.parametrize(
+    ("condition", "expected_cost"),
+    [
+        ("compact__qwen3_6_27b", 454415.58),
+        ("compact__qwen3_8_27b", 311965.28),
+        ("fable__claude", 233524.77),
+    ],
+)
+def test_pdptw_saved_model_solutions_are_verified_and_reproduce_declared_cost(condition, expected_cost):
+    # 保存解（あれば）が unverified にならず、申告費用を再計算で再現することを確認する。
+    path = BASE_DIR / "outputs" / "rescore_hard" / "solutions" / condition / "prob_321.json"
+    if not path.exists():
+        pytest.skip(f"{path} is not available")
+    record = _load("prob_321")
+    result = _check(record, json.loads(path.read_text(encoding="utf-8"))["solution"])
+    assert result["verified"] is True
+    assert result["cost"] == pytest.approx(expected_cost, rel=1e-4)

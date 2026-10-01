@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections import Counter
 from typing import Any
 
@@ -180,16 +181,51 @@ def _detect_pdptw(instance: dict) -> bool:
     return all(isinstance(instance.get(k), list) for k in keys) and "customers" not in instance
 
 
+# "P12" / "D12" / "pickup_12" / "delivery-12" のような文字列停留所（大文字小文字は区別しない）。
+_STOP_TEXT = re.compile(r"^(p|d|pickup|delivery|dropoff)[ _:-]?(\d+)$", re.IGNORECASE)
+_KIND_ALIASES = {"p": "pickup", "pickup": "pickup", "d": "delivery", "delivery": "delivery",
+                 "dropoff": "delivery"}
+
+
+def _as_id(value: Any) -> Any:
+    """数値 id が "12" のように文字列化されていれば int に戻す。それ以外はそのまま返す。"""
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return value
+
+
 def _parse_stop(stop: Any) -> tuple[Any, Any] | None:
-    """stop を (pair_id, kind) に揃える。[id, kind] と {"pair"/"id", "type"/"kind"} を受ける。"""
+    """stop を (pair_id, kind) に揃える。読めない形は None。
+
+    [id, kind]、{"pair"/"pair_id"/"id", "type"/"kind"}（座標などの付随キーは無視）、"P12"/"D12" を受ける。
+    kind の無い裸の id は受取か配送か決まらないので読まない。
+    """
+    if isinstance(stop, str):
+        match = _STOP_TEXT.match(stop.strip())
+        return (int(match.group(2)), _KIND_ALIASES[match.group(1).lower()]) if match else None
     if isinstance(stop, (list, tuple)) and len(stop) == 2:
-        return stop[0], stop[1]
-    if isinstance(stop, dict):
-        pair_id = stop.get("pair", stop.get("id"))
-        kind = stop.get("type", stop.get("kind"))
-        if pair_id is not None and kind is not None:
-            return pair_id, kind
-    return None
+        pair_id, kind = stop
+    elif isinstance(stop, dict):
+        pair_id = next((stop[k] for k in ("pair", "pair_id", "id") if k in stop), None)
+        kind = next((stop[k] for k in ("type", "kind") if k in stop), None)
+    else:
+        return None
+    if pair_id is None or not isinstance(kind, str):
+        return None
+    return _as_id(pair_id), _KIND_ALIASES.get(kind.strip().lower(), kind)
+
+
+def _strip_depot_ends(stops: list, depot_id: Any) -> list:
+    """先頭・末尾に置かれたデポ id（裸の数値）は出発・帰着の印として読み飛ばす。
+
+    裸の数値は kind を持たず pair 停留所にはなり得ないので、デポ id と一致する端の要素だけ外す。
+    途中や、デポ id と一致しない裸の数値は _parse_stop で None になり unverified のまま。
+    """
+    if stops and _is_num(stops[0]) and stops[0] == depot_id:
+        stops = stops[1:]
+    if stops and _is_num(stops[-1]) and stops[-1] == depot_id:
+        stops = stops[:-1]
+    return stops
 
 
 def _check_pdptw(instance: dict, solution: Any) -> dict:
@@ -213,7 +249,7 @@ def _check_pdptw(instance: dict, solution: Any) -> dict:
         used[(depot["id"], vehicle["type"])] += 1
         known = []
         order: dict[Any, dict[str, int]] = {}
-        for position, raw in enumerate(stops):
+        for position, raw in enumerate(_strip_depot_ends(stops, depot["id"])):
             stop = _parse_stop(raw)
             if stop is None:
                 return _unverified(f"{label}: stop {raw!r} is not [pair_id, kind]")
