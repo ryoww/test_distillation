@@ -431,3 +431,53 @@ def test_surv_node_path_over_parallel_arcs_is_unverified():
     result = _check(record, {"opened_arc_ids": [], "od_paths": od_paths})
     assert result["verified"] is False
     assert "parallel arcs" in result["violations"][0]
+
+
+def test_mcnd_origin_destination_pairs_without_routes_are_unmet_demand():
+    # Qwen3.8 (gepa) の prob_318: od_paths が OD 順の [origin, destination] だけで、開設も流量も無い。
+    record = RECORDS["prob_318"]
+    instance = record["instance"]
+    od_paths = [[od["origin"], od["destination"]] for od in instance["od_demands"]]
+    result = _check(record, {"opened_arc_ids": [], "arc_flows": [], "od_paths": od_paths})
+    assert result["verified"] is True
+    assert result["feasible"] is False
+    assert "OD 0 carries 0 of demand 15" in _messages(result)
+    assert "closed arc" not in _messages(result)
+    assert result["cost"] is None
+
+
+def test_mcnd_direct_arc_node_path_in_route_dict_is_still_a_path():
+    # {path: [origin, destination], volume} は経路の記述なので、直行アークのノード列として読む。
+    record = RECORDS["prob_318"]
+    instance = record["instance"]
+    arcs = {a["id"]: a for a in instance["arcs"]}
+    index, entries = next(
+        (i, e) for i, e in record["ref"]["od_paths"].items() if len(e[0]["path"]) == 1
+    )
+    arc = arcs[entries[0]["path"][0]]
+    od_paths = {index: [{"path": [arc["from"], arc["to"]], "volume": entries[0]["volume"]}]}
+    result = _check(record, {"opened_arc_ids": [arc["id"]], "od_paths": od_paths})
+    assert result["verified"] is True
+    assert f"OD {index} " not in _messages(result)
+
+
+def test_surv_list_of_empty_routes_is_unmet_not_unverified():
+    # Qwen3.8 (gepa) の prob_325: od_paths が OD 順の [[], []] で、開設アークも無い。
+    record = RECORDS["prob_325"]
+    od_paths = [[[], []] for _ in record["instance"]["od_demands"]]
+    result = _check(record, {"opened_arc_ids": [], "od_paths": od_paths})
+    assert result["verified"] is True
+    assert result["feasible"] is False
+    assert "OD 0 path1 ends at node 14, not destination 2" in _messages(result)
+    assert "OD 0 path2 ends at node 14, not destination 2" in _messages(result)
+    assert result["cost"] is None
+
+
+def test_surv_list_of_arc_routes_matches_reference():
+    # path1/path2 を dict にせず [path1, path2] と並べた形は参照解と同じ値になる。
+    record = RECORDS["prob_325"]
+    od_paths = [
+        [entry["path1"], entry["path2"]]
+        for _, entry in sorted(record["ref"]["od_paths"].items(), key=lambda kv: int(kv[0]))
+    ]
+    _assert_same_as_reference(record, {"opened_arc_ids": record["ref"]["opened_arc_ids"], "od_paths": od_paths})

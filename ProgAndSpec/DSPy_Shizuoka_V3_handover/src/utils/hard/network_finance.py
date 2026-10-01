@@ -30,6 +30,9 @@
   終わり全ホップがアークならノード列、そうでなければアーク id 列）。``paths`` に複数経路を入れる形。
 - OD ごとの ``flow_distribution`` {arc_id: 流量}（mcnd）。経路に分解せず流量保存則で検査する。
 - 申告流量 ``arc_flows``/``arc_loads`` は dict でもアーク順の list でもよい。
+- OD 要素が起終点そのものの ``[origin, destination]``（mcnd）や経路の list ``[[...], [...]]``（mcnd_surv）。
+  前者は経路を持たない OD として流量なしで読む。何も開設せず何も流していない解は、未充足需要の
+  費用が問題文に定義されていないので cost=None のまま違反を積む（unverified にはしない）。
 """
 
 from __future__ import annotations
@@ -356,6 +359,12 @@ def _network_cost_checks(
     mismatch = _declared_mismatch(solution, cost, "objective_value", "total_cost")
     if mismatch:
         violations.append(mismatch)
+    routed = any(f > _FLOW_TOL for f in flows.values())
+    demanded = any(float(od.get("volume", 0.0)) > 0 for od in instance["od_demands"])
+    if not opened and not routed and demanded:
+        # Why not cost=0: 未充足需要の費用は問題文に無いので、何も敷設せず何も流さない解の
+        # 目的値は未定義。0 にすると参照解より良い値として採点されてしまう。
+        return checks, None
     return checks, cost
 
 
@@ -402,6 +411,10 @@ def _mcnd_routes(net: _Net, entry: Any, origin: int, destination: int) -> list:
     """mcnd の OD 要素を経路のリストに読む。参照解は {path, volume} のリスト。"""
     if isinstance(entry, dict) and isinstance(entry.get("paths"), list):
         entry = entry["paths"]
+    if isinstance(entry, list) and _id_list(entry) == [origin, destination]:
+        # Why not 経路として読む: 起終点そのものの対は OD の言い換えで、直行アークやアーク id 列と
+        # 二重に読める。一意に取れないので経路なし（流量なし）として需要未達を積む。
+        return []
     if isinstance(entry, dict) or (isinstance(entry, list) and _id_list(entry) is not None):
         entry = [entry]
     if not isinstance(entry, list):
@@ -476,9 +489,12 @@ def _surv_routes(
     net: _Net, entry: Any, count: int, origin: int, destination: int
 ) -> tuple[list[tuple[list[int], float | None]], float | None]:
     """mcnd_surv の OD 要素を (経路リスト, volume_each) に読む。参照解は path1..pathK + volume_each。"""
-    if not isinstance(entry, dict):
-        raise _Unreadable("od_paths entry is not a dict")
-    if "path1" in entry:
+    if isinstance(entry, list) and all(isinstance(item, (list, dict)) for item in entry):
+        # 経路を要素ごとに並べた list（[[...], [...]]）。空経路は辿れないので _walk が報告する。
+        items = entry
+    elif not isinstance(entry, dict):
+        raise _Unreadable("od_paths entry is neither a dict nor a list of routes")
+    elif "path1" in entry:
         items = [entry[k] for k in (f"path{k}" for k in range(1, count + 1)) if k in entry]
     elif isinstance(entry.get("paths"), list):
         items = entry["paths"]
