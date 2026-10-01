@@ -19,6 +19,9 @@ from . import register_kind
 _EPS = 1e-6
 # 申告目的値と再計算値のずれをどこまで許すか（brief の 0.5%）。
 _DECLARED_REL_TOL = 5e-3
+# ロット量は小数 6 桁程度に丸めて返されるため、加工時間の合計が能力を 1e-6 前後だけ超えることが
+# ある。_EPS ではこの丸めを違反に数えてしまうので、能力照合だけ少し広い許容差を使う。
+_CAPACITY_TOL = 1e-5
 
 
 def _as_num(value: Any) -> float | None:
@@ -38,6 +41,38 @@ def _as_int(value: Any) -> int | None:
         return int(value)
     if isinstance(value, str) and value.strip().lstrip("-").isdigit():
         return int(value.strip())
+    return None
+
+
+def _as_flag(value: Any) -> bool | None:
+    """段取りフラグ（True/False、0/1）を bool にする。読めなければ None。"""
+    if isinstance(value, bool):
+        return value
+    number = _as_num(value)
+    return None if number is None else number != 0
+
+
+def _pick(entry: dict, *names: str) -> Any:
+    """同義キーのうち最初に見つかった値を返す（どれも無ければ None）。"""
+    for name in names:
+        if name in entry:
+            return entry[name]
+    return None
+
+
+# モデルが返す同義キー。id は参照解の名前を先頭に置き、以降は自然な別名。
+_ITEM_KEYS = ("item", "item_id", "id", "product", "product_id")
+_MACHINE_KEYS = ("machine", "machine_id")
+_PLANT_KEYS = ("plant", "plant_id")
+_CUSTOMER_KEYS = ("customer", "customer_id")
+_QTY_KEYS = ("qty", "quantity", "amount", "production")
+_INVENTORY_KEYS = ("end_inventory", "inventory")
+
+
+def _positional(values: Any, num_periods: int) -> list | None:
+    """期順のリスト（index 0 が第 1 期）として読めるときだけ返す。長さが期数と違えば None。"""
+    if isinstance(values, list) and len(values) == num_periods:
+        return values
     return None
 
 
@@ -70,38 +105,76 @@ def _detect_clsp(instance: dict) -> bool:
     )
 
 
-def _parse_clsp_plan(plan: Any) -> dict[int, dict[tuple[int, int], float]] | None:
-    """production_plan を {item_id: {(machine, period): qty}} に正規化する。形が違えば None。"""
+def _parse_clsp_lots(entries: Any, num_periods: int) -> dict[tuple[int, int], float] | None:
+    """1 品目分のロット列を {(machine, period): qty} にする。形が違えば None。
+
+    読める形: record のリスト [{machine, period, qty}]、それを "production" に入れた dict、
+    期順の [{machine: qty, ...}, ...]（長さが期数と一致するときだけ位置を期と読む）。
+    """
+    if isinstance(entries, dict):
+        entries = _pick(entries, "production", "lots")
+    if not isinstance(entries, list):
+        return None
+    lots: dict[tuple[int, int], float] = defaultdict(float)
+    if entries and all(
+        isinstance(e, dict) and all(_as_int(k) is not None for k in e) for e in entries
+    ):
+        if _positional(entries, num_periods) is None:
+            return None
+        for period, by_machine in enumerate(entries, start=1):
+            for raw_machine, raw_qty in by_machine.items():
+                qty = _as_num(raw_qty)
+                if qty is None:
+                    return None
+                lots[(_as_int(raw_machine), period)] += qty
+        return dict(lots)
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return None
+        machine = _as_int(_pick(entry, *_MACHINE_KEYS))
+        period = _as_int(entry.get("period"))
+        qty = _as_num(_pick(entry, *_QTY_KEYS))
+        if machine is None or period is None or qty is None:
+            return None
+        # 同じ (機械, 期) の重複エントリは 1 ロットに合算する（段取りは 1 回）。
+        lots[(machine, period)] += qty
+    return dict(lots)
+
+
+def _parse_clsp_plan(plan: Any, num_periods: int) -> dict[int, dict[tuple[int, int], float]] | None:
+    """production_plan を {item_id: {(machine, period): qty}} に正規化する。形が違えば None。
+
+    {item: ロット列} の dict のほか、品目 id を持つ record のフラットなリストも品目ごとに
+    まとめて読む。
+    """
+    if isinstance(plan, list):
+        grouped: dict[Any, list] = defaultdict(list)
+        for entry in plan:
+            item_id = _as_int(_pick(entry, *_ITEM_KEYS)) if isinstance(entry, dict) else None
+            if item_id is None:
+                return None
+            grouped[item_id].append(entry)
+        plan = grouped
     if not isinstance(plan, dict):
         return None
     parsed: dict[int, dict[tuple[int, int], float]] = {}
     for raw_item, entries in plan.items():
         item_id = _as_int(raw_item)
-        if item_id is None or not isinstance(entries, list):
+        lots = _parse_clsp_lots(entries, num_periods)
+        if item_id is None or lots is None:
             return None
-        lots: dict[tuple[int, int], float] = defaultdict(float)
-        for entry in entries:
-            if not isinstance(entry, dict):
-                return None
-            machine = _as_int(entry.get("machine"))
-            period = _as_int(entry.get("period"))
-            qty = _as_num(entry.get("qty"))
-            if machine is None or period is None or qty is None:
-                return None
-            # 同じ (機械, 期) の重複エントリは 1 ロットに合算する（段取りは 1 回）。
-            lots[(machine, period)] += qty
-        parsed[item_id] = dict(lots)
+        parsed[item_id] = lots
     return parsed
 
 
 def _check_clsp(instance: dict, solution: Any) -> dict:
     if not isinstance(solution, dict):
         return _unverified("clsp solution is not a dict")
-    plan = _parse_clsp_plan(solution.get("production_plan"))
+    num_periods = int(instance["num_periods"])
+    plan = _parse_clsp_plan(solution.get("production_plan"), num_periods)
     if plan is None:
         return _unverified("clsp solution without a readable 'production_plan'")
 
-    num_periods = int(instance["num_periods"])
     items = {int(it["id"]): it for it in instance["items"]}
     machines = {int(m["id"]): m for m in instance["machines"]}
     violations: list[str] = []
@@ -148,7 +221,7 @@ def _check_clsp(instance: dict, solution: Any) -> dict:
 
     for (machine, period), used in load.items():
         capacity = float(machines[machine]["capacity_per_period"])
-        if used > capacity + _EPS:
+        if used > capacity + _CAPACITY_TOL:
             violations.append(
                 f"machine {machine} period {period} uses {used:.1f} > capacity {capacity:.1f}"
             )
@@ -214,22 +287,50 @@ def _distance(a: dict, b: dict, kind: str) -> float:
     return math.hypot(dx, dy)
 
 
-def _parse_prp_plan(plan: Any) -> dict[tuple[int, int], dict] | None:
+def _prp_plan_records(plan: dict, num_periods: int) -> list[dict] | None:
+    """{plant: {production: [期順], setup: [期順], inventory: [期順]}} を record のリストに展開する。"""
+    records: list[dict] = []
+    for raw_plant, fields in plan.items():
+        if not isinstance(fields, dict):
+            return None
+        production = _positional(_pick(fields, *_QTY_KEYS), num_periods)
+        setups = fields.get("setup")
+        inventories = _pick(fields, *_INVENTORY_KEYS)
+        if production is None:
+            return None
+        # 補助列は無くてもよいが、あるのに期数と長さが違えば位置が決まらない。
+        if setups is not None and _positional(setups, num_periods) is None:
+            return None
+        if inventories is not None and _positional(inventories, num_periods) is None:
+            return None
+        for idx, qty in enumerate(production):
+            record = {"plant": raw_plant, "period": idx + 1, "production": qty}
+            if setups is not None:
+                record["setup"] = setups[idx]
+            if inventories is not None:
+                record["end_inventory"] = inventories[idx]
+            records.append(record)
+    return records
+
+
+def _parse_prp_plan(plan: Any, num_periods: int) -> dict[tuple[int, int], dict] | None:
     """production_plan を {(plant, period): {production, setup, end_inventory}} にする。"""
+    if isinstance(plan, dict):
+        plan = _prp_plan_records(plan, num_periods)
     if not isinstance(plan, list):
         return None
     parsed: dict[tuple[int, int], dict] = {}
     for entry in plan:
         if not isinstance(entry, dict):
             return None
-        plant = _as_int(entry.get("plant"))
+        plant = _as_int(_pick(entry, *_PLANT_KEYS))
         period = _as_int(entry.get("period"))
-        production = _as_num(entry.get("production"))
+        production = _as_num(_pick(entry, *_QTY_KEYS))
         if plant is None or period is None or production is None:
             return None
         setup = entry.get("setup")
-        setup_flag = None if setup is None else bool(_as_num(setup))
-        end_inventory = _as_num(entry.get("end_inventory"))
+        setup_flag = None if setup is None else _as_flag(setup)
+        end_inventory = _as_num(_pick(entry, *_INVENTORY_KEYS))
         # 同じ (工場, 期) が複数回あれば生産量を合算する。
         prev = parsed.get((plant, period))
         if prev is not None:
@@ -251,7 +352,7 @@ def _parse_routes(routes: Any) -> list[dict] | None:
     for route in routes:
         if not isinstance(route, dict):
             return None
-        plant = _as_int(route.get("plant"))
+        plant = _as_int(_pick(route, *_PLANT_KEYS))
         period = _as_int(route.get("period"))
         customers = route.get("customers")
         quantities = route.get("quantities")
@@ -269,17 +370,83 @@ def _parse_routes(routes: Any) -> list[dict] | None:
     return parsed
 
 
+def _parse_allocation(
+    allocation: Any, plant_ids: set[int], customer_ids: set[int], num_periods: int
+) -> dict[tuple[int, int], float] | None:
+    """allocation を {(customer, period): 配送量} にする。量が取れない形なら None（照合しない）。
+
+    読める形: record のリスト [{customer, period, qty}]、{customer: {period: {plant: qty}}}、
+    {customer: {"deliveries": {period: qty}}}、{plant: {customer: [期順]}} とその逆向き
+    （向きは id の集合で決め、どちらとも取れれば None）。
+    """
+    allocated: dict[tuple[int, int], float] = defaultdict(float)
+    if isinstance(allocation, list):
+        for entry in allocation:
+            if not isinstance(entry, dict):
+                return None
+            cid = _as_int(_pick(entry, *_CUSTOMER_KEYS))
+            period = _as_int(entry.get("period"))
+            qty = _as_num(_pick(entry, *_QTY_KEYS))
+            if cid is None or period is None or qty is None:
+                return None
+            allocated[(cid, period)] += qty
+        return dict(allocated)
+    if not isinstance(allocation, dict):
+        return None
+    series: list[tuple[int, int, list]] = []
+    for raw_outer, inner in allocation.items():
+        outer = _as_int(raw_outer)
+        if outer is None or not isinstance(inner, dict):
+            return None
+        by_period = isinstance(inner.get("deliveries"), dict)
+        if by_period:
+            inner = inner["deliveries"]
+        for raw_key, value in inner.items():
+            key = _as_int(raw_key)
+            if key is None:
+                return None
+            if isinstance(value, dict):
+                quantities = [_as_num(q) for q in value.values()]
+                if any(q is None for q in quantities):
+                    return None
+                allocated[(outer, key)] += sum(quantities)
+            elif isinstance(value, list):
+                if _positional(value, num_periods) is None:
+                    return None
+                series.append((outer, key, value))
+            elif by_period and _as_num(value) is not None:
+                allocated[(outer, key)] += _as_num(value)
+            else:
+                # {customer: {k: 量}} の k は期とも工場とも取れるので "deliveries" 配下だけ読む。
+                return None
+    if series:
+        outers = {o for o, _k, _v in series}
+        inners = {k for _o, k, _v in series}
+        outer_is_plant = outers <= plant_ids and inners <= customer_ids
+        outer_is_customer = outers <= customer_ids and inners <= plant_ids
+        if outer_is_plant == outer_is_customer:
+            return None
+        for outer, key, values in series:
+            cid = key if outer_is_plant else outer
+            for idx, raw_qty in enumerate(values):
+                qty = _as_num(raw_qty)
+                if qty is None:
+                    return None
+                allocated[(cid, idx + 1)] += qty
+    return dict(allocated)
+
+
 def _check_prp(instance: dict, solution: Any) -> dict:
     if not isinstance(solution, dict):
         return _unverified("prp solution is not a dict")
-    plan = _parse_prp_plan(solution.get("production_plan"))
+    num_periods = int(instance["periods"])
+    plan = _parse_prp_plan(solution.get("production_plan"), num_periods)
     if plan is None:
         return _unverified("prp solution without a readable 'production_plan'")
     routes = _parse_routes(solution.get("routes"))
     if routes is None:
         return _unverified("prp solution without a readable 'routes'")
 
-    num_periods = int(instance["periods"])
     plants = {int(p["id"]): p for p in instance["plants"]}
     customers = {int(c["id"]): c for c in instance["customers"]}
     vehicle_capacity = float(instance["vehicle_capacity"])
@@ -398,20 +565,10 @@ def _check_prp(instance: dict, solution: Any) -> dict:
             customer_cost += float(customer["inventory_cost"]) * max(inventory, 0.0)
 
     # allocation があればルートの配送量と一致することを確かめる（配送の正はルート側）。
-    allocation = solution.get("allocation")
-    if isinstance(allocation, dict):
-        allocated: dict[tuple[int, int], float] = defaultdict(float)
-        for raw_c, per_period in allocation.items():
-            cid = _as_int(raw_c)
-            if cid is None or not isinstance(per_period, dict):
-                continue
-            for raw_t, by_plant in per_period.items():
-                period = _as_int(raw_t)
-                if period is None or not isinstance(by_plant, dict):
-                    continue
-                allocated[(cid, period)] += sum(
-                    _as_num(q) or 0.0 for q in by_plant.values()
-                )
+    allocated = _parse_allocation(
+        solution.get("allocation"), set(plants), set(customers), num_periods
+    )
+    if allocated is not None:
         mismatched = sorted(
             key
             for key in set(allocated) | set(delivered)

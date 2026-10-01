@@ -68,11 +68,28 @@ def test_shifted_declared_objective_is_reported(pid):
 @pytest.mark.parametrize("pid", sorted(PROBLEMS))
 def test_unreadable_solutions_are_unverified_not_infeasible(pid):
     _record, instance, _solution, _objective = _load(pid)
-    for bad in (None, [], {}, {"production_plan": 3}, {"production_plan": [], "routes": "x"}):
+    bad_shapes = [None, [], {}, {"production_plan": 3}, {"production_plan": "x"}]
+    if PROBLEMS[pid] != "clsp":
+        bad_shapes.append({"production_plan": [], "routes": "x"})
+    for bad in bad_shapes:
         result = _check(instance, bad)
         assert result["verified"] is False
         assert result["feasible"] is True
         assert result["cost"] is None
+
+
+@pytest.mark.parametrize("pid", sorted(PROBLEMS))
+def test_empty_plan_is_read_and_its_violations_are_counted(pid):
+    _record, instance, _solution, _objective = _load(pid)
+    empty = {"production_plan": [], "routes": []}
+    result = _check(instance, empty)
+    assert result["verified"] is True
+    assert result["cost"] is not None
+    if PROBLEMS[pid] == "clsp":
+        lost = sum(it["lost_sale_cost"] * sum(it["demand"]) for it in instance["items"])
+        assert result["cost"] == pytest.approx(lost)
+    else:
+        assert any("stockout" in v for v in result["violations"])
 
 
 # ---------------- clsp ----------------
@@ -121,6 +138,80 @@ def test_clsp_missing_item_counts_its_demand_as_lost_sales():
     dropped = copy.deepcopy(solution)
     del dropped["production_plan"]["1"]
     assert _check(instance, dropped)["cost"] > result["cost"]
+
+
+def _clsp_records(plan: dict) -> list[dict]:
+    """参照解の {item: [{machine, period, qty}]} を品目 id 付きのフラットな record 列にする。"""
+    return [
+        {"item_id": int(item), "machine_id": lot["machine"], "period": lot["period"], "quantity": lot["qty"]}
+        for item, lots in plan.items()
+        for lot in lots
+    ]
+
+
+def test_clsp_flat_record_list_with_item_ids_reproduces_reference():
+    _record, instance, solution, objective = _load("prob_301")
+    records = _clsp_records(solution["production_plan"])
+    # 保存解にあった余分な 0 始まりの period_index は無視し、1 始まりの period を読む。
+    records[0]["period_index"] = records[0]["period"] - 1
+    solution["production_plan"] = records
+    result = _check(instance, solution)
+    assert result["feasible"] is True, result["violations"][:3]
+    assert result["cost"] == pytest.approx(objective, rel=1e-6)
+
+
+def test_clsp_record_without_item_id_is_unverified():
+    _record, instance, solution, _objective = _load("prob_301")
+    solution["production_plan"] = [{"machine": 4, "period": 5, "qty": 273.0}]
+    assert _check(instance, solution)["verified"] is False
+
+
+def test_clsp_per_item_production_dict_with_auxiliary_series_is_read():
+    _record, instance, solution, objective = _load("prob_311")
+    # 保存解の形: {item: {"production": [{period, machine, quantity}], "inventory": [...], "lost_sales": [...]}}
+    solution["production_plan"] = {
+        item: {
+            "production": [
+                {"period": lot["period"], "machine": lot["machine"], "quantity": lot["qty"]}
+                for lot in lots
+            ],
+            "inventory": [0.0] * instance["num_periods"],
+            "lost_sales": [0.0] * instance["num_periods"],
+        }
+        for item, lots in solution["production_plan"].items()
+    }
+    result = _check(instance, solution)
+    assert result["feasible"] is True, result["violations"][:3]
+    assert result["cost"] == pytest.approx(objective, rel=1e-6)
+
+
+def test_clsp_period_ordered_machine_dicts_are_read_only_at_horizon_length():
+    _record, instance, solution, objective = _load("prob_311")
+    num_periods = instance["num_periods"]
+    # 保存解の形: {item: [{machine: qty, ...} per period]}（index 0 が第 1 期）。
+    positional = {}
+    for item, lots in solution["production_plan"].items():
+        periods = [{} for _ in range(num_periods)]
+        for lot in lots:
+            periods[lot["period"] - 1][str(lot["machine"])] = lot["qty"]
+        positional[item] = periods
+    solution["production_plan"] = positional
+    result = _check(instance, copy.deepcopy(solution))
+    assert result["feasible"] is True, result["violations"][:3]
+    assert result["cost"] == pytest.approx(objective, rel=1e-6)
+    solution["production_plan"]["1"].append({})
+    assert _check(instance, solution)["verified"] is False
+
+
+def test_clsp_capacity_check_tolerates_decimal_rounding_but_not_real_overload():
+    _record, instance, _solution, _objective = _load("prob_301")
+    item = instance["items"][0]
+    machine = next(m for m in instance["machines"] if m["id"] == item["compatible_machines"][0])
+    fill = (machine["capacity_per_period"] - item["setup_time"]) / item["unit_process_time"]
+    plan = {str(item["id"]): [{"machine": machine["id"], "period": 1, "qty": round(fill + 5e-7, 6)}]}
+    assert _check(instance, {"production_plan": plan})["feasible"] is True
+    plan[str(item["id"])][0]["qty"] = fill + 1e-3
+    assert any("> capacity" in v for v in _check(instance, {"production_plan": plan})["violations"])
 
 
 # ---------------- prp / prp_tw ----------------
@@ -191,6 +282,116 @@ def test_prp_route_quantities_define_deliveries_when_allocation_is_absent():
     result = _check(instance, copy.deepcopy(solution))
     assert result["feasible"] is True
     assert result["cost"] == pytest.approx(objective, rel=1e-6)
+
+
+def _assert_reproduces(instance: dict, solution: dict, objective: float) -> dict:
+    result = _check(instance, solution)
+    assert result["verified"] is True
+    assert result["feasible"] is True, result["violations"][:3]
+    assert result["cost"] == pytest.approx(objective, rel=1e-6)
+    return result
+
+
+@pytest.mark.parametrize("pid", ["prob_320", "prob_327"])
+def test_prp_plan_records_with_synonym_keys_are_read(pid):
+    _record, instance, solution, objective = _load(pid)
+    # 保存解の形: plant_id / quantity / inventory、setup は bool。
+    solution["production_plan"] = [
+        {
+            "plant_id": e["plant"],
+            "period": e["period"],
+            "quantity": e["production"],
+            "setup": bool(e["setup"]),
+            "inventory": e["end_inventory"],
+        }
+        for e in solution["production_plan"]
+    ]
+    _assert_reproduces(instance, solution, objective)
+
+
+def _plan_by_plant(plan: list[dict], num_periods: int) -> dict:
+    """参照解の record 列を {plant: {production: [期順], setup: [期順], inventory: [期順]}} にする。"""
+    by_plant: dict = {}
+    for e in plan:
+        series = by_plant.setdefault(
+            str(e["plant"]),
+            {"production": [0.0] * num_periods, "setup": [0] * num_periods, "inventory": [0.0] * num_periods},
+        )
+        idx = e["period"] - 1
+        series["production"][idx] = e["production"]
+        series["setup"][idx] = e["setup"]
+        series["inventory"][idx] = e["end_inventory"]
+    return by_plant
+
+
+def test_prp_tw_per_plant_period_series_plan_is_read_only_at_horizon_length():
+    _record, instance, solution, objective = _load("prob_327")
+    solution["production_plan"] = _plan_by_plant(solution["production_plan"], instance["periods"])
+    _assert_reproduces(instance, copy.deepcopy(solution), objective)
+    solution["production_plan"]["1"]["setup"].append(0)
+    assert _check(instance, solution)["verified"] is False
+
+
+def test_prp_zero_based_periods_are_reported_as_violations_not_shifted():
+    _record, instance, solution, _objective = _load("prob_320")
+    for route in solution["routes"]:
+        route["period"] -= 1
+    result = _check(instance, solution)
+    assert result["verified"] is True
+    assert result["feasible"] is False
+    assert any("period 0) has an unknown plant or period" in v for v in result["violations"])
+
+
+def _allocation_records(allocation: dict) -> list[dict]:
+    """参照解の {customer: {period: {plant: qty}}} を record 列にする。"""
+    return [
+        {"customer": int(c), "plant": int(p), "period": int(t), "quantity": q}
+        for c, per_period in allocation.items()
+        for t, by_plant in per_period.items()
+        for p, q in by_plant.items()
+    ]
+
+
+def test_prp_allocation_record_list_is_compared_with_route_deliveries():
+    _record, instance, solution, objective = _load("prob_320")
+    solution["allocation"] = _allocation_records(solution["allocation"])
+    _assert_reproduces(instance, copy.deepcopy(solution), objective)
+    solution["allocation"][0]["quantity"] += 1
+    assert any("allocation differs" in v for v in _check(instance, solution)["violations"])
+
+
+def test_prp_allocation_records_without_quantities_are_not_compared():
+    _record, instance, solution, objective = _load("prob_320")
+    # 保存解の形: 顧客→工場の割当だけで配送量が無い。照合できないので読み飛ばす。
+    solution["allocation"] = [{"customer_id": 1, "plant_id": 3}]
+    _assert_reproduces(instance, solution, objective)
+
+
+def test_prp_tw_allocation_series_by_plant_then_customer_is_oriented_by_ids():
+    _record, instance, solution, objective = _load("prob_327")
+    num_periods = instance["periods"]
+    by_plant: dict = {}
+    for rec in _allocation_records(solution["allocation"]):
+        row = by_plant.setdefault(str(rec["plant"]), {}).setdefault(str(rec["customer"]), [0.0] * num_periods)
+        row[rec["period"] - 1] += rec["quantity"]
+    solution["allocation"] = by_plant
+    _assert_reproduces(instance, copy.deepcopy(solution), objective)
+    next(iter(by_plant["1"].values()))[0] += 1
+    assert any("allocation differs" in v for v in _check(instance, solution)["violations"])
+    # 工場 id とも顧客 id とも取れる {1: {2: [...]}} は向きが決まらないので照合しない。
+    solution["allocation"] = {"1": {"2": [999.0] * num_periods}}
+    _assert_reproduces(instance, solution, objective)
+
+
+def test_prp_tw_allocation_deliveries_by_period_is_read():
+    _record, instance, solution, objective = _load("prob_327")
+    # 保存解の形: {customer: {"plant": p, "deliveries": {period: qty}, "inventory": [...]}}
+    deliveries: dict = {}
+    for rec in _allocation_records(solution["allocation"]):
+        entry = deliveries.setdefault(str(rec["customer"]), {"plant": rec["plant"], "deliveries": {}})
+        entry["deliveries"][str(rec["period"])] = entry["deliveries"].get(str(rec["period"]), 0.0) + rec["quantity"]
+    solution["allocation"] = deliveries
+    _assert_reproduces(instance, solution, objective)
 
 
 # ---------------- 誤検知 ----------------
