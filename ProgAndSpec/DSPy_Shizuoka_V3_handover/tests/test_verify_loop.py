@@ -190,3 +190,18 @@ def test_summary_of_a_clean_first_pass_is_not_a_repair():
 
 def test_empty_summary_is_well_formed():
     assert summarize_attempts([])["attempts"] == 0
+
+
+def test_a_failing_revision_call_keeps_the_first_pass_code():
+    """What: when the reviser raises (empty LM response), the first code is returned, not lost."""
+    broken = _code_returning("{}")
+
+    def reviser(**kwargs):
+        raise RuntimeError("The LM returned an empty or null response.")
+
+    code, _, attempts = generate_verified(
+        FakeProgram(first=broken), "req", CORE_TYPE, INSTANCE, max_attempts=2, reviser=reviser
+    )
+    assert code == broken
+    assert [a.kind for a in attempts] == ["empty", "revise_failed"]
+    assert "empty or null" in attempts[-1].feedback

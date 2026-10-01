@@ -165,13 +165,21 @@ def generate_verified(
         )
         if verdict.ok or index >= max_attempts:
             break
-        revised = revise(
-            original_code=code,
-            parse_code=parse_code,
-            feedback=verdict.feedback,
-            core_type=core_type,
-            return_schema=return_schema,
-        )
+        try:
+            revised = revise(
+                original_code=code,
+                parse_code=parse_code,
+                feedback=verdict.feedback,
+                core_type=core_type,
+                return_schema=return_schema,
+            )
+        except Exception as exc:  # noqa: BLE001 - LM 側の失敗は種類を問わず first-pass を残す
+            # Why not 例外を上げる: 書き直しの LM 呼び出しが空応答などで失敗しても、
+            # 最初に得たコードは採点に値する。gen_error として捨てない。
+            attempts.append(
+                RepairAttempt(index=index + 1, kind="revise_failed", ok=False, feedback=str(exc)[:500])
+            )
+            break
         revised_code = getattr(revised, "algorithm_code", "") or ""
         if not revised_code.strip() or revised_code.strip() == code.strip():
             # Why stop: 同じコードが返ったら、もう一周しても同じ結果にしかならない。
