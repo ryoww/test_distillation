@@ -215,9 +215,8 @@ def test_role_roster_preference_penalty_is_weighted_by_seniority():
         ("prob_302", {"pairings": [{"flights": ["x"]}]}),
         ("prob_330", {"stage1": {"pairings": []}, "stage2": {"assignments": [{"crew_id": 5}]}}),
         ("prob_330", {"stage1": {"pairings": [[1], [1]]}, "stage2": {"p0": 1, "p1": 2}}),
-        ("prob_306", {"roster": {"1": ["off"] * 28}}),
-        ("prob_306", {"roster": [{"nurse_id": 1, "schedule": ["off"] * 28}]}),
-        ("prob_323", {"roster": []}),
+        ("prob_306", {"roster": {"999": ["off"] * 28}}),
+        ("prob_306", {"roster": {"1": [3] * 28, "2": [3] * 28}, "breakdown": {}}),
         ("prob_323", {"roster": [{"staff_id": 1, "day": 1, "shift": "off"}]}),
     ],
 )
@@ -238,6 +237,37 @@ def test_empty_pairing_and_assignment_lists_are_read_as_all_uncovered():
 
 
 # ---------------------------------------------------------------- モデルが実際に返した形
+@pytest.mark.parametrize(
+    ("pid", "solution"),
+    [
+        ("prob_306", {"roster": {"1": ["off"] * 28}}),
+        ("prob_306", {"roster": [{"nurse_id": 1, "schedule": ["off"] * 28}]}),
+        ("prob_306", {"roster": {}}),
+        ("prob_323", {"roster": []}),
+    ],
+)
+def test_roster_missing_people_are_read_as_all_off(pid, solution):
+    record = _load(pid)
+    result = _check(record, solution)
+    demand = sum(
+        v for req in record["instance"]["daily_requirements"] for k, v in req.items() if k != "day"
+    )
+    assert result["verified"] and result["feasible"]
+    assert result["cost"] == pytest.approx(200 * demand)
+
+
+def test_nurse_roster_missing_nurses_are_charged_as_shortage_alongside_declared_mismatch():
+    record = _load("prob_306")
+    reference = _reference(record)
+    key, row = next(iter(reference["roster"].items()))
+    solution = {"objective_value": 0.0, "roster": {key: row}}
+    result = _check(record, solution)
+    full = _check(record, {"roster": {**{k: ["off"] * 28 for k in reference["roster"]}, key: row}})
+    assert result["verified"] and not result["feasible"]
+    assert result["cost"] == pytest.approx(full["cost"])
+    assert any("declared objective 0.0" in v for v in result["violations"])
+
+
 @pytest.mark.parametrize("pid", ["prob_306", "prob_316"])
 def test_nurse_roster_reads_list_of_nurse_records(pid):
     record = _load(pid)

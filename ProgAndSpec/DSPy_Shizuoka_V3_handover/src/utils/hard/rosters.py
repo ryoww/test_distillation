@@ -12,7 +12,7 @@
 解析は「意味が一意に取れる形」まで広げる: record のリスト（`{"nurse_id", "schedule"}` /
 `{"staff_id", "day", "shift"}`）、ラベル付きペアリングと `{"pairing_id", "crew_id"}` 型の割当、
 `{"p0": [便列]}` / `{"p0": クルー}` 型の stage、`outsourced_flights` などの同義キー。
-凡例の無い整数コードの勤務表は状態が決まらないので unverified のまま。
+載っていない人は全日 off として読む。凡例の無い整数コードの勤務表は状態が決まらないので unverified のまま。
 """
 
 from __future__ import annotations
@@ -411,12 +411,17 @@ def _roster_rows_from_records(records: list, days: int) -> dict[Any, list] | Non
 def _parse_roster(
     solution: Any, people: dict[int, dict], days: int, states: set[str]
 ) -> dict[int, list[tuple[str, Any]]] | None:
-    """`roster` を {人 ID: [(state, region or None)] × days} へ正規化する。"""
+    """`roster` を {人 ID: [(state, region or None)] × days} へ正規化する。
+
+    載っていない人は全日 off として読む（record 0 件も同じ）。Why not unverified: 状態文字列は
+    参照解と同じ語彙なので「勤務が無い」以外に読みようがなく、人員不足は検査で違反と費用に積める。
+    instance に居ない人 ID だけは意味が取れないので None。
+    """
     if not isinstance(solution, dict):
         return None
     roster = _first(solution, _ROSTER_KEYS)
     if isinstance(roster, list):
-        rows = _roster_rows_from_records(roster, days)
+        rows = {} if not roster else _roster_rows_from_records(roster, days)
         if rows is None and len(roster) == len(people):
             rows = dict(zip(people, roster))
         roster = rows
@@ -435,8 +440,10 @@ def _parse_roster(
                 return None
             entries.append((state, region))
         parsed[pid] = entries
-    if set(parsed) != set(people):
+    if not set(parsed) <= set(people):
         return None
+    for pid in people:
+        parsed.setdefault(pid, [(_OFF, None)] * days)
     return parsed
 
 
@@ -562,7 +569,7 @@ def _check_nurse_roster(instance: dict, solution: Any) -> dict:
     states = set(instance.get("shifts", [])) | {_OFF}
     roster = _parse_roster(solution, nurses, len(reqs), states)
     if roster is None:
-        return _unverified("nurse roster without a readable 'roster' covering every nurse")
+        return _unverified("nurse roster without a readable 'roster'")
     violations = []
     for pid in sorted(roster):
         violations += _rule_violations(f"nurse {pid}", [s for s, _ in roster[pid]], instance["rules"])
@@ -590,7 +597,7 @@ def _check_role_roster(instance: dict, solution: Any) -> dict:
     states = set(instance.get("shifts", [])) | {_OFF}
     roster = _parse_roster(solution, staff, len(reqs), states)
     if roster is None:
-        return _unverified("role roster without a readable 'roster' covering every staff member")
+        return _unverified("role roster without a readable 'roster'")
     rules = instance["rules"]
     violations = []
     for pid in sorted(roster):
