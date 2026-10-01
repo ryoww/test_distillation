@@ -220,7 +220,11 @@ def _detect_cutting_2d(instance: dict) -> bool:
 
 
 def _parse_counts(raw: Any) -> dict[str, float] | None:
-    """cuts / items を {item_id: 本数} へ寄せる。ID のリストなら出現回数を数える。"""
+    """cuts / items を {item_id: 本数} へ寄せる。
+
+    辞書 {id: 本数} のほか、ID のリスト（出現回数を数える）と
+    [{"id": 12, "count": 4}, ...] のような record のリスト（count が無ければ 1 個）を読む。
+    """
     if isinstance(raw, dict):
         if not all(_num(v) for v in raw.values()):
             return None
@@ -228,9 +232,17 @@ def _parse_counts(raw: Any) -> dict[str, float] | None:
     if isinstance(raw, list):
         counts: dict[str, float] = {}
         for item in raw:
-            if isinstance(item, (dict, list)):
+            cnt: Any = 1
+            if isinstance(item, dict):
+                item_id = _pick(item, "item_id", "item", "id")
+                cnt = _pick(item, "count", "qty", "quantity", "num", "pieces")
+                cnt = 1 if cnt is None else cnt
+                if item_id is None or not _num(cnt):
+                    return None
+                item = item_id
+            elif isinstance(item, list):
                 return None
-            counts[_sid(item)] = counts.get(_sid(item), 0) + 1
+            counts[_sid(item)] = counts.get(_sid(item), 0) + cnt
         return counts
     return None
 
@@ -244,7 +256,8 @@ def _parse_patterns(solution: Any) -> list[dict] | None:
         if not isinstance(pat, dict):
             return None
         stock = _pick(pat, "stock_id", "stock", "plate_id", "plate")
-        count = _pick(pat, "runs", "count", "uses", "quantity", "num")
+        count = _pick(pat, "runs", "count", "uses", "usage", "quantity", "qty", "num",
+                      "bars", "copies", "multiplicity")
         if stock is None or not _num(count):
             return None
         parsed.append({"stock": _sid(stock), "count": count, "raw": pat})
@@ -294,7 +307,7 @@ def _check_cutting_1d(instance: dict, solution: Any) -> dict:
     violations: list[str] = []
     sigs = []
     for idx, pat in enumerate(patterns):
-        counts = _parse_counts(_pick(pat["raw"], "cuts", "items"))
+        counts = _parse_counts(_pick(pat["raw"], "cuts", "items", "counts", "pieces"))
         if counts is None:
             return _unverified(f"pattern {idx} has no readable 'cuts'")
         width = 0.0
@@ -342,7 +355,7 @@ def _check_cutting_2d(instance: dict, solution: Any) -> dict:
         for s_idx, strip in enumerate(strips):
             if not isinstance(strip, dict):
                 return _unverified(f"pattern {idx} strip {s_idx} is not a mapping")
-            strip_items = _parse_counts(_pick(strip, "items", "cuts"))
+            strip_items = _parse_counts(_pick(strip, "items", "cuts", "counts", "pieces"))
             if strip_items is None:
                 return _unverified(f"pattern {idx} strip {s_idx} has no readable 'items'")
             width = 0.0

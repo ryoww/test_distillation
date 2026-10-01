@@ -274,3 +274,105 @@ def test_cutting_2d_rejects_min_lot_and_stacked_height():
     assert "min_lot" in joined
     assert "stacked strip height" in joined
     assert "exceeds strip height" in joined
+
+
+# ---------------------------------------------------------------- 保存解から切り出した形
+# LLM が実際に返した形の小さな抜粋（outputs/rescore_hard/solutions の prob_317 / prob_324 から）。
+QWEN36_317_PATTERNS = [
+    {"stock_id": 1, "items": [{"id": 12, "count": 4}], "usage": 1},
+    {"stock_id": 1, "items": [{"id": 6, "count": 1}, {"id": 12, "count": 2}, {"id": 21, "count": 1}],
+     "usage": 1},
+]
+QWEN38_317_PATTERNS = [
+    {"pattern_id": 1, "stock_id": 5, "stock": 5, "counts": {"27": 7}, "bars": 2, "waste": 3},
+    {"pattern_id": 3, "stock_id": 5, "stock": 5, "counts": {"4": 2, "8": 6}, "bars": 7, "waste": 10},
+]
+CLAUDE_324_PATTERN = {
+    "pattern_id": 1, "plate_id": 3, "count": 5,
+    "strips": [
+        {"height": 1200, "width_used": 4700, "items": [
+            {"item_id": 16, "width": 1200, "height": 1200},
+            {"item_id": 45, "width": 1000, "height": 1200},
+            {"item_id": 66, "width": 1000, "height": 1200},
+            {"item_id": 66, "width": 1000, "height": 1200},
+            {"item_id": 19, "width": 500, "height": 1200},
+        ]},
+        {"height": 600, "width_used": 2300, "items": [
+            {"item_id": 8, "width": 1200, "height": 600},
+            {"item_id": 65, "width": 1100, "height": 600},
+        ]},
+    ],
+}
+
+
+def test_cutting_1d_reads_item_records_with_usage_and_reports_demand_shortfall():
+    """items が [{"id", "count"}] の record リスト、本数が usage の解を読み、違反を積む。"""
+    instance = _load("prob_317")["instance"]
+    result = find_kind(instance).check(instance, {"patterns": QWEN36_317_PATTERNS})
+    assert result["verified"] is True
+    assert result["feasible"] is False
+    assert result["cost"] == pytest.approx(2 * 320)
+    assert any("item 1: produced 0 < demand" in v for v in result["violations"])
+    assert not any("pattern" in v and "unknown" in v for v in result["violations"])
+
+
+def test_cutting_1d_reads_counts_dict_with_bars_like_cuts_with_runs():
+    """counts / bars の解は、同じ内容を cuts / runs で書いた解と同じ判定になる。"""
+    instance = _load("prob_317")["instance"]
+    kind = find_kind(instance)
+    canonical = [
+        {"stock_id": p["stock_id"], "runs": p["bars"], "cuts": p["counts"]}
+        for p in QWEN38_317_PATTERNS
+    ]
+    got = kind.check(instance, {"patterns": QWEN38_317_PATTERNS})
+    want = kind.check(instance, {"patterns": canonical})
+    assert got["verified"] is True
+    assert got["cost"] == pytest.approx(want["cost"]) == pytest.approx(9 * 741)
+    assert got["violations"] == want["violations"]
+
+
+def test_cutting_2d_reads_strip_item_records_and_sums_repeated_ids():
+    """strips[].items が 1 個 1 record のリストでも読め、同じ item_id の繰り返しは本数に足し込む。"""
+    instance = _load("prob_324")["instance"]
+    kind = find_kind(instance)
+    canonical = {
+        "stock_id": 3, "runs": 5,
+        "strips": [
+            {"height": 1200, "items": {"16": 1, "45": 1, "66": 2, "19": 1}},
+            {"height": 600, "items": {"8": 1, "65": 1}},
+        ],
+    }
+    got = kind.check(instance, {"patterns": [CLAUDE_324_PATTERN]})
+    want = kind.check(instance, {"patterns": [canonical]})
+    assert got["verified"] is True
+    assert got["cost"] == pytest.approx(want["cost"]) == pytest.approx(5 * 95000)
+    assert got["violations"] == want["violations"]
+    # 幅の検査には instance の寸法が使われる（record の width は読まない）
+    overfull = copy.deepcopy(CLAUDE_324_PATTERN)
+    overfull["strips"][0]["items"] += [{"item_id": 16, "width": 1}] * 4
+    result = kind.check(instance, {"patterns": [overfull]})
+    assert any("exceeds plate width" in v for v in result["violations"])
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [{"width": 1200, "height": 1200}],      # id が無い record
+        [{"id": 12, "count": "four"}],          # 本数が数値でない
+        [[12, 4]],                              # 要素がリスト
+    ],
+)
+def test_cutting_item_records_without_unique_meaning_stay_unverified(items):
+    instance = _load("prob_317")["instance"]
+    result = find_kind(instance).check(
+        instance, {"patterns": [{"stock_id": 1, "runs": 1, "items": items}]}
+    )
+    assert result["verified"] is False
+    assert result["violation_count"] == 0
+
+
+def test_cutting_error_only_payload_stays_unverified():
+    """{"error": "No solution found"} のように patterns の無い解は未検証のまま。"""
+    instance = _load("prob_307")["instance"]
+    result = find_kind(instance).check(instance, {"error": "No solution found"})
+    assert result["verified"] is False
