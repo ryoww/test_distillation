@@ -170,17 +170,27 @@ def _try_teacher(job: tuple[str, str, str, float]) -> tuple[str, str, dict]:
     if not ok:
         return instance_path, teacher_path, {"ok": False, "error": str(result)[:300]}
     checked = check_feasibility_detailed(core_type, record["instance"], result)
-    feasible = (
-        bool(checked.get("verified")) and checked["feasible"] and not checked["violation_count"]
-    )
+    violations = [str(v) for v in checked.get("violations", [])]
+    verified = bool(checked.get("verified"))
+    feasible = verified and checked["feasible"] and not violations
+    # 申告した目的値だけがずれている解は構造としては可行。申告欄を再計算値で上書きして使う。
+    declared_key = None
+    if verified and len(violations) == 1 and violations[0].startswith("declared "):
+        declared_key = violations[0].split()[1]
+        feasible = True
+    if feasible and declared_key and isinstance(result, dict) and checked.get("cost") is not None:
+        result = {**result, declared_key: checked["cost"]}
+        if "objective_value" in result:
+            result["objective_value"] = checked["cost"]
     return (
         instance_path,
         teacher_path,
         {
             "ok": True,
             "feasible": feasible,
+            "declared_fixed": declared_key,
             "cost": checked.get("cost"),
-            "violations": [str(v)[:120] for v in checked.get("violations", [])[:3]],
+            "violations": [v[:120] for v in violations[:3]],
             "solution": result if feasible else None,
         },
     )
