@@ -669,3 +669,11 @@ LABEL=ministral3_14b_reasoning MODEL_PATH=mistralai/Ministral-3-14B-Reasoning-25
 - 修復ループは `REPAIR_ATTEMPTS=2`（`--max-repair-attempts`）で有効になります。検証器の違反を見せて書き直させる
   もので、大規模 28 問では 3 条件とも 2〜3 問しか救えませんでした（`RESCORE_REPORT.md` 25 章）。
 
+### 11.1 種別ごとの instance 生成と教師コードによる参照解
+
+`src/hardgen/` の生成器で 20 種別 × N instance を作り（`scripts/generate_hard_instances.py`）、
+`scripts/reference_hard_instances.py` で参照解を付けます（`collect` → `run` → `finalize`）。参照解は
+検証器を通った既存の solve() の最良解で、最適性は未証明です（`RESCORE_REPORT.md` 26 章）。
+出力は `data/problems_hard_gen/{train,validation,test}/` で、評価にはそのまま `--data-dir` に渡せます。
+`run` は 1 対あたり最大 `--timeout` 秒かかるので、800 instance × 95 教師で 32 並列・約 6 時間です。
+

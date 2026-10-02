@@ -79,7 +79,73 @@ def parse_args() -> argparse.Namespace:
     run.add_argument("--timeout", type=float, default=900.0)
     run.add_argument("--kinds", default="all")
     run.add_argument("--limit", type=int, help="先頭 N instance だけ（動作確認用）")
+    fin = sub.add_parser("finalize", help="書き出した参照解の申告欄を再計算値に揃え、自己検証する")
+    fin.add_argument("--output-dir", type=Path, default=BASE_DIR / "data" / "problems_hard_gen")
     return parser.parse_args()
+
+
+def _align_declared(core_type: str, instance: dict, solution: dict) -> tuple[dict, dict]:
+    """検証器が「申告値 X が再計算値と違う」と言う欄を再計算値で上書きし、通るまで繰り返す。
+
+    Why not 教師実行時の 1 回だけ: 検証器の文言は概念名（objective / total_cost）で、解のキー名と
+    一致しないことがある。値で欄を探して直し、検証器が黙るまで最大 3 回回す。
+    """
+    solution = dict(solution)
+    checked = check_feasibility_detailed(core_type, instance, solution)
+    for _ in range(3):
+        violations = [str(v) for v in checked.get("violations", [])]
+        declared = [v for v in violations if v.startswith("declared ")]
+        if not declared or len(declared) != len(violations) or checked.get("cost") is None:
+            break
+        cost = checked["cost"]
+        for message in declared:
+            parts = message.split()
+            key, value = parts[1], float(parts[2])
+            # 文言の名前は概念名なので、まず申告値と一致する欄をすべて書き換え、無ければ名前で探す。
+            matched = False
+            for k, v in list(solution.items()):
+                if (
+                    isinstance(v, (int, float))
+                    and not isinstance(v, bool)
+                    and abs(float(v) - value) <= 1e-6 * max(1.0, abs(value))
+                ):
+                    solution[k] = cost
+                    matched = True
+            if not matched and key in solution and isinstance(solution[key], (int, float)):
+                solution[key] = cost
+        checked = check_feasibility_detailed(core_type, instance, solution)
+    return solution, checked
+
+
+def finalize(args: argparse.Namespace) -> None:
+    fixed = failed = total = 0
+    for split in ("train", "validation", "test"):
+        for path in sorted((args.output_dir / split).glob("prob_*.json")):
+            record = json.loads(path.read_text(encoding="utf-8"))
+            core_type = f"{record['domain']}_{record['math_type']}"
+            reference = record["reference_solution"]
+            solution = {k: v for k, v in reference.items() if k not in ("objective_value", "note")}
+            aligned, checked = _align_declared(core_type, record["instance"], solution)
+            total += 1
+            ok = (
+                checked.get("verified")
+                and checked["feasible"]
+                and not checked["violation_count"]
+                and checked.get("cost") is not None
+            )
+            if not ok:
+                failed += 1
+                print(f"{path.name}: still failing: {checked.get('violations', [])[:2]}")
+                continue
+            if aligned != solution or abs(checked["cost"] - reference["objective_value"]) > 1e-9:
+                fixed += 1
+                record["reference_solution"] = {
+                    "objective_value": checked["cost"],
+                    **aligned,
+                    "note": reference["note"],
+                }
+                path.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"finalize: {total} references, {fixed} aligned, {failed} still failing")
 
 
 # 保存した返り値のディレクトリ名は条件名と揃っていないので、候補を順に探す。
@@ -282,6 +348,8 @@ def main() -> None:
     args = parse_args()
     if args.command == "collect":
         collect(args)
+    elif args.command == "finalize":
+        finalize(args)
     else:
         run(args)
 

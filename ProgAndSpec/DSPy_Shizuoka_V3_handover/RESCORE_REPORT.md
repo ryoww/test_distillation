@@ -1389,3 +1389,74 @@ MODEL_LABEL=qwen3_8_27b PROMPT=gepa_compact PROGRAM=prompts/compiled_program_v3_
 MODEL_LABEL=qwen3_6_27b PROMPT=compact PROGRAM=prompts/compiled_program_v3_compact.json sbatch --export=ALL scripts/slurm_eval_generated_one.sbatch
 uv run python scripts/rescore_with_checkers.py <run dirs> --data-dir data/problems_hard --timeout 1800 --output outputs/prompt_model_comparisons/rescored-hard28-final-20261001.json
 ```
+
+## 26. 大規模 20 種別 × 40 instance の生成と、教師コードによる参照解（2026-10-02）
+
+### 26.1 何を作ったか
+
+25 章までの 28 問は 1 問 1 instance で学習と評価を分けられなかった。種別ごとに元 instance と同じ形・同じ分布の
+instance を作る生成器を `src/hardgen/`（6 群、20 種別、テスト 148 件）に書き、20 種別 × 40 = 800 instance を
+生成した（`scripts/generate_hard_instances.py`、seed 20261002、1 分 35 秒）。同じ種別に元問題が 2 つある 8 種別は
+2 つの元問題を交互に使い、規模の違いを両方含める。分割は種別ごとに train 30 / validation 4 / test 6。
+
+生成器は件数・id 規約・問題文に書かれた定数を元から写し、座標・需要・時間枠・費用などを元 instance の経験分布から
+引く。きつさの指標（需要/能力、接続アーク数、必要総長/原材長など）は元の値が生成 20 件の範囲に入ることを
+テストで固定した。意図的に元と変えたのは CVaR ポートフォリオ（prob_326）だけで、元は現保有の合計が 1.0 かつ
+売却不可のため解が現保有に固定される自明 instance だったので、現保有の合計を 0.6〜0.8 にして組入れの余地を残した。
+
+### 26.2 参照解の付け方
+
+厳密解が作れない規模なので、参照解は「元 28 問で検証器を通った既存の solve()（教師コード）を新 instance に
+走らせ、可行だった中で最も良い目的値の解」とした（`scripts/reference_hard_instances.py`）。教師コードは 7 条件の
+保存結果から 95 本（Fable 26、Qwen3.8 系 46、Qwen3.6 系 17、Gemma 6）。申告した目的値だけがずれていた解
+（25 本）も構造は可行なので教師に含め、参照解に書くときは申告欄を再計算値で上書きする（`finalize`）。
+800 instance × 教師 = 3,800 対の実行は 32 並列・900 秒上限で 5 時間 50 分。
+
+結果: **800 instance すべてに参照解が付いた**（可行解を出せる教師がない instance は 0）。書き出した参照解は
+全件が検証器を違反 0 で通り、objective_value を再現する。
+
+| 種別 | 教師 | 可行教師/instance | 最良教師 | 参照値の中央（生成） vs 元問題の参照値 |
+|---|---:|---:|---|---|
+| clsp | 4 | 3.6 | Fable 39, Qwen3.8 1 | 594,589 vs 502,059 / 3,401,768 vs 2,237,481 |
+| crew_pairing | 11 | 10.6 | Fable 39 | 8,934,307 vs 14,481,285 / 16,946,163 vs 26,319,164 |
+| crew_pairing_seniority | 5 | 5.0 | Fable 19, Qwen3.6 15, Qwen3.8 4 | 3,926,637 vs 7,512,080 |
+| cutting_1d | 7 | 6.0 | Qwen3.8 32, Fable 8 | 526,495 vs 547,960 / 827,636 vs 848,014 |
+| cutting_2d | 3 | 3.0 | Fable 40 | 4,560,000 vs 9,333,000 |
+| facility_2ech | 1 | 1.0 | Fable 40 | 2,599,090 vs 12,172,143 |
+| facility_multi | 2 | 2.0 | Fable 40 | 6,987,776 vs 11,274,248 / 4,449,892 vs 6,295,656 |
+| facility_robust | 4 | 4.0 | Qwen3.8 修復 38, Qwen3.8 2 | 839,105 vs 2,601,000 |
+| fjsp | 12 | 12.0 | Fable 35, Qwen3.8 5 | 597 vs 601 / 404 vs 538 |
+| fjsp_setup | 2 | 2.0 | Fable 40 | 605 vs 675 |
+| mcnd | 6 | 5.8 | Qwen3.8 GEPA 修復 24, Fable 16 | 462,063 vs 812,068 / 300,521 vs 873,363 |
+| mcnd_surv | 2 | 1.9 | Fable 40 | 293,356 vs 303,303 |
+| nurse_roster | 9 | 6.0 | Fable 40 | 43,816 vs 83,628 / 138,756 vs 220,861 |
+| pdptw | 2 | 2.0 | Fable 40 | 223,594 vs 259,082 |
+| portfolio | 4 | 4.0 | Qwen3.6 修復 40 | 0.0599 vs 0.0603 |
+| portfolio_cvar | 3 | 1.0 | Fable 40 | 0.1221 vs 0.1246 |
+| prp | 1 | 1.0 | Fable 40 | 1,216,168 vs 1,340,924 |
+| prp_tw | 3 | 2.9 | Fable 40 | 365,722 vs 548,270 |
+| role_roster | 4 | 4.0 | Fable 40 | 216,377 vs 222,075 |
+| vrptw_md | 10 | 9.8 | Fable 40 | 212,744 vs 400,162 / 348,462 vs 1,017,772 |
+
+### 26.3 読み方と限界
+
+- **参照解の質は教師の強さに依存する。** 20 種別中 14 種別で Fable の解が全 instance の最良で、参照解は事実上
+  「文脈なしの Fable が 600 秒で出した解」である。元問題の参照解（850 秒のヒューリスティック）より良い種別が
+  多いのは、元の参照解が弱いことの裏返しでもある（24 章の gap と整合）。最適性は未証明なので、採点では
+  `beat_reference` が普通に起こる。gap で読む集合であって、exact_match を数える集合ではない。
+- **教師が 1 本しかない種別が 3 つ**（facility_2ech、prp、portfolio_cvar）。参照解はその教師の解そのもので、
+  比較対象として弱い。SFT の教師としても書き方の多様性がない。
+- **分布は元 instance から推定したもの**で、元の生成器（Ver2 pipeline）は手元にない。学習と評価を同じ生成器から
+  出す限り比較は成り立つが、元 28 問への汎化を保証するものではない。元 28 問は引き続き別の評価集合として使う。
+- 検証器が読めない形で返す教師（整数コードの勤務表など）は可行扱いにならないので、教師の選別はこれまでと同じく
+  「読めて、制約を満たし、目的値が再計算できる」解に限られている。
+
+### 26.4 使い方
+
+- 評価: `data/problems_hard_gen/test`（120 問、種別 × 6）を `--data-dir` に渡す。採点は 24 章の検証器で、
+  実行上限は問題文どおり 1,800 秒（`EXEC_TIMEOUT=1800`）。
+- SFT: `data/problems_hard_gen/train`（600 問）に対して教師コードを走らせた可行解が、そのまま (問題文, コード) 対になる。
+  23 章の `build_sft_dataset.py` は雛形生成器前提なので、この集合用には教師ディレクトリ `outputs/hard_teachers/` と
+  `reference_meta.teacher_costs` から対を組む別経路が要る（未実装）。
+- 再現: `scripts/generate_hard_instances.py --per-kind 40 --seed 20261002` →
+  `scripts/reference_hard_instances.py collect` → `run --workers 32 --timeout 900` → `finalize`。
