@@ -173,14 +173,27 @@ def main() -> None:
         by_kind: dict[str, list[str]] = defaultdict(list)
         for iid, record in records.items():
             by_kind[record["provenance"]["kind"]].append(iid)
+        # Why not 正解キーをすべて再生: 解答者は同じ種別の 5 問に同じソルバーを保存することが多く、
+        # そのまま再生すると同一コードを同じ instance で何度も走らせ、同じ学習対が重複する。
+        # 本文が同じコードは 1 本だけ再生し、すでに自分の問題で正解した instance には走らせない。
+        solved_by_code: dict[tuple[str, str], set[str]] = defaultdict(set)
+        representative: dict[tuple[str, str], str] = {}
+        for iid, key, _, _ in pairs:
+            answer = code_by_key[key]
+            code_id = (answer["source"], answer["code"].strip())
+            solved_by_code[code_id].add(iid)
+            representative.setdefault(code_id, key)
         jobs = []
-        for key in sorted(correct_keys):
+        for code_id, key in sorted(representative.items(), key=lambda item: item[1]):
             answer = code_by_key[key]
             kind = records[answer["instance_id"]]["provenance"]["kind"]
             for iid in by_kind[kind]:
-                if iid != answer["instance_id"]:
+                if iid not in solved_by_code[code_id]:
                     jobs.append((path_of[iid], answer["code"], key, args.timeout, args.max_gap))
-        print(f"replaying {len(correct_keys)} correct codes on {len(jobs)} other instances")
+        print(
+            f"replaying {len(representative)} distinct correct codes "
+            f"(of {len(correct_keys)}) on {len(jobs)} other instances"
+        )
         replay_verdicts = Counter()
         for record_path, key, verdict in _run(jobs, args.workers):
             replay_verdicts[verdict["correct"]] += 1
