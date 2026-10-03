@@ -35,6 +35,17 @@ def parse_args() -> argparse.Namespace:
     exp = sub.add_parser("export")
     exp.add_argument("--data-dir", type=Path, required=True)
     exp.add_argument("--out-dir", type=Path, required=True)
+    exp.add_argument(
+        "--no-reference",
+        action="store_true",
+        help="参照値を問題文に入れない（SFT の学習入力と同じ形にする）",
+    )
+    exp.add_argument("--ids", type=Path, help="対象の instance_id を 1 行 1 つ書いたファイル")
+    exp.add_argument(
+        "--instances-out",
+        type=Path,
+        help="instance だけの JSON を書き出す先（解答者が手元で実行して確かめる用。参照解は含めない）",
+    )
     col = sub.add_parser("collect")
     col.add_argument("--data-dir", type=Path, required=True)
     col.add_argument("--answers-dir", type=Path, required=True)
@@ -52,10 +63,19 @@ def main() -> None:
     args = parse_args()
     records = load_v3_data(str(args.data_dir))
     if args.command == "export":
+        if args.ids:
+            wanted = {line.strip() for line in args.ids.read_text().splitlines() if line.strip()}
+            records = [r for r in records if f"prob_{r['id']:03d}" in wanted]
         instruction = AlgorithmGenerator().generate.predict.signature.instructions
         args.out_dir.mkdir(parents=True, exist_ok=True)
+        if args.instances_out:
+            args.instances_out.mkdir(parents=True, exist_ok=True)
         for record in records:
-            example = convert_to_dspy_example(record, use_reference=True)
+            example = convert_to_dspy_example(record, use_reference=not args.no_reference)
+            if args.instances_out:
+                (args.instances_out / f"{example['instance_id']}.json").write_text(
+                    json.dumps(record["instance"], ensure_ascii=False), encoding="utf-8"
+                )
             text = (
                 f"{instruction}\n\n---\n\n{example['requirement']}\n\n---\n\n"
                 "Write the complete Python code for solve(instance) and nothing else. "
