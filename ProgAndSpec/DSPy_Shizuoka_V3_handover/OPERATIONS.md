@@ -706,5 +706,12 @@ STUDENT_PATH=/var/tmp/yy-lab-ft/gemma4-12b-merged-lora-20261004-merged RUN_DIR=o
 - 反省用の train は種別ごとに 1 問（20 問）、候補の採否は validation の種別ごとに 1 問（20 問）。問題文が
   `--max-train-requirement-chars` を超える問題は反省に回さない（反省 LM の文脈を超えるため）。
 - student は温度 0 で解かせる。GEPA は同じ minibatch で親と子を比べて採否を決めるので、標本の揺れを入れない。
+- W1 の標本は train だけから取る。validation は GEPA の候補選択に使うので、学習に入れると次の P の評価が水増しされる。
+- DSPy の `BetterTogether(p=GEPA, w=BootstrapFinetune, strategy="p -> w -> p")` と同じ順序・同じ扱いにしている。
+  `BootstrapFinetune` はその時点の（進化した）指示文で学習データを作り、2 回目の p は進化した指示文から始まる
+  （論文本文は学習データの prompt を素の指示文に戻すと書くが、DSPy 3.3 の実装に合わせた）。
+  `dspy.BetterTogether` そのものを使わないのは、重み側が DSPy の LocalProvider（同一プロセスで起動・学習）を前提と
+  しており、Slurm の GPU 割り当て、Gemma 4 の 16k token 学習、vLLM 0.28 での配信をそこに載せられないため。
+  各段を Slurm のジョブにして依存関係でつなぎ、段ごとに同じテスト集合で測る。
 - 評価は段ごとに「student × 指示文」の組で、雛形テスト・大規模生成テスト・大規模元問題・雛形外 11 問
   （`data/problems` に `EXCLUDE_TEMPLATED_DIRS`）を同じ条件で測る。
