@@ -87,6 +87,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Update all model parameters instead of adding LoRA adapters.",
     )
+    parser.add_argument(
+        "--fp32-weights",
+        action="store_true",
+        help="Keep fp32 master weights and compute in bf16 autocast (for full fine-tuning).",
+    )
+    parser.add_argument(
+        "--model-parallel",
+        action="store_true",
+        help="Split the layers over all visible GPUs (device_map=auto).",
+    )
+    parser.add_argument(
+        "--max-memory",
+        default=None,
+        help='--model-parallel で GPU ごとに置く重みの上限 JSON（例: \'{"0":"18GiB","1":"40GiB"}\'）',
+    )
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--lora-dropout", type=float, default=0.05)
@@ -138,12 +153,21 @@ def load_model(args: argparse.Namespace, quantization: BitsAndBytesConfig | None
         if getattr(config, "vision_config", None) is not None
         else AutoModelForCausalLM
     )
+    # Why not bf16 の重みのまま全層学習: 学習率 1e-5 の更新は bf16 の丸め幅より小さく大半が消え、
+    # Gemma 4 12B では検証損失が LoRA の 12 倍に留まった。fp32 の主重みに積み、計算だけ bf16 にする。
+    # Why not device_map=balanced: 共有した埋め込みと出力層が GPU 0 に載り、語彙 26 万の logits
+    # （16k token で 12 GB 超）も GPU 0 に出るため、重みを均等に割ると GPU 0 だけが溢れる。
+    device_map = "auto" if args.load_in_4bit or args.model_parallel else None
+    max_memory = None
+    if args.max_memory:
+        max_memory = {int(k): v for k, v in json.loads(args.max_memory).items()}
     return model_class.from_pretrained(
         args.model,
         revision=args.model_revision,
-        dtype=torch.bfloat16,
+        dtype=torch.float32 if args.fp32_weights else torch.bfloat16,
         quantization_config=quantization,
-        device_map="auto" if args.load_in_4bit else None,
+        device_map=device_map,
+        max_memory=max_memory,
     )
 
 
@@ -338,6 +362,9 @@ def main() -> None:
         else None
     )
     adapter_dir = run_dir / "adapter"
+    if args.fp32_weights:
+        # Why not fp32 のまま保存: vLLM の dtype=auto は fp32 のモデルを fp16 で配信し、Gemma は fp16 で溢れる。
+        trainer.model.to(torch.bfloat16)
     trainer.model.save_pretrained(adapter_dir)
     tokenizer.save_pretrained(adapter_dir)
     metrics = trainer.evaluate()
