@@ -31,9 +31,10 @@ MAX_TOKENS="${MAX_TOKENS:-32768}"
 LM_TIMEOUT="${LM_TIMEOUT:-5400}"
 EXEC_TIMEOUT="${EXEC_TIMEOUT:-900}"
 READY_TIMEOUT_SEC="${READY_TIMEOUT_SEC:-1800}"
-# Why not --fit 任せ: ctx 49152 では --fit が VRAM にエキスパートを詰めすぎ、最初の decode で
-# 4.9 GB の計算バッファが確保できず落ちた（job 784）。RAM 側に回す層を明示して空きを作る。
-SERVER_ARGS="${SERVER_ARGS:---n-cpu-moe 10}"
+# Why not --fit の既定余白（1 GB）: ctx 49152 では最初の decode で 4.9 GB の計算バッファが確保できず
+# 落ちた（job 784）。--n-cpu-moe を明示すると --fit が GPU 間の配分も止め、1 枚に 161 GB を割り当てて
+# 読み込みで落ちた（job 785）。--fit は残したまま、各 GPU に残す余白だけを広げる。
+SERVER_ARGS="${SERVER_ARGS:---fit-target 8192}"
 # Why not 7501 固定: 手作業で立てた vLLM / llama.cpp と衝突しないよう、ジョブ ID で分ける。
 PORT=$((7600 + ${SLURM_JOB_ID:-0} % 100))
 LOG_DIR="$HANDOVER_DIR/outputs/slurm/$RUN_NAME"
