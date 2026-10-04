@@ -683,3 +683,28 @@ LABEL=ministral3_14b_reasoning MODEL_PATH=mistralai/Ministral-3-14B-Reasoning-25
 出力は `data/problems_hard_gen/{train,validation,test}/` で、評価にはそのまま `--data-dir` に渡せます。
 `run` は 1 対あたり最大 `--timeout` 秒かかるので、800 instance × 95 教師で 32 並列・約 6 時間です。
 
+
+## 12. プロンプト最適化と fine-tuning の交互最適化（BetterTogether 型）
+
+目標（2027 年 3 月に最適化専用の小型エージェント）の 2 本目の柱で、GEPA と fine-tuning を交互に回します。
+1 周は「P: 学習済みモデル（student）の system 指示文を GEPA で進化 → W: 進化した指示文で解かせて正解を
+集め、指示文を差し替えたデータで学習し直す → P: 新しい student で再び GEPA」です。
+
+| 段 | 中身 | 道具 |
+|---|---|---|
+| P（GEPA） | student を GPU 0、反省の Qwen3.8 を GPU 1 に配信。学習時と同じ「system＝指示文、user＝問題文、出力＝コード」の形で解かせ、一般則だけを書かせる反省テンプレートで指示文を進化させる | `scripts/slurm_gepa_student.sbatch`（`scripts/gepa_student.py`、`src/student_program.py`） |
+| W1（標本） | 進化した指示文で大規模 train / validation（676 問）を解かせる | `slurm_eval_solver.sbatch` に `INSTRUCTION_FILE` |
+| W2（データ） | 正解（違反 0・参照から +10% 以内）だけを学習対にし、雛形・Opus のデータと合わせて全行の system を進化した指示文に差し替える | `build_hard_sft_dataset.py --runs ... --instruction-file`、`merge_sft_datasets.py --system-file` |
+| W3（学習） | 土台から LoRA を学習し直して焼き込む | `slurm_train_solver.sbatch`、ルートの `merge_adapter.py` |
+
+```bash
+export QWEN_HF_HOME=/home/yy-lab/test_DSPy/model/hf_home QWEN_VLLM_ENV=/home/yy-lab/test_DSPy/.runtime/vllm/vllm-cu13
+STUDENT_PATH=/var/tmp/yy-lab-ft/gemma4-12b-merged-lora-20261004-merged RUN_DIR=outputs/bt-r1/gepa \
+  GEPA_ARGS="--max-full-evals 6 --num-threads 8 --exec-timeout 600" sbatch --export=ALL scripts/slurm_gepa_student.sbatch
+```
+
+- 反省用の train は種別ごとに 1 問（20 問）、候補の採否は validation の種別ごとに 1 問（20 問）。問題文が
+  `--max-train-requirement-chars` を超える問題は反省に回さない（反省 LM の文脈を超えるため）。
+- student は温度 0 で解かせる。GEPA は同じ minibatch で親と子を比べて採否を決めるので、標本の揺れを入れない。
+- 評価は段ごとに「student × 指示文」の組で、雛形テスト・大規模生成テスト・大規模元問題・雛形外 11 問
+  （`data/problems` に `EXCLUDE_TEMPLATED_DIRS`）を同じ条件で測る。
