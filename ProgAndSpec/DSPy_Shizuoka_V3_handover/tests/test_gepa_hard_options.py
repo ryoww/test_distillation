@@ -113,7 +113,8 @@ def test_seed_instruction_and_reflection_template_reach_gepa(monkeypatch, tmp_pa
         log_dir=tmp_path / "gepa_logs" / "run_v3",
     )
     assert captured["instruction"] == "SEED RULES"
-    assert captured["kwargs"]["gepa_kwargs"]["reflection_prompt_template"].startswith("T ")
+    assert captured["kwargs"]["instruction_proposer"].template.startswith("T ")
+    assert "gepa_kwargs" not in captured["kwargs"]
     assert captured["kwargs"]["log_dir"] == str(tmp_path / "gepa_logs" / "run_v3")
 
 
@@ -122,3 +123,25 @@ def test_shipped_reflection_template_has_both_placeholders():
     assert Counter(p for p in ("<curr_param>", "<side_info>") if p in text) == Counter(
         {"<curr_param>": 1, "<side_info>": 1}
     )
+
+
+def test_real_gepa_accepts_the_template_proposer():
+    proposer = train.TemplateInstructionProposer("T <curr_param> <side_info>")
+    dspy_gepa = train.dspy.GEPA(
+        metric=lambda *a, **k: 0.0, reflection_lm=None, instruction_proposer=proposer, max_full_evals=1
+    )
+    assert dspy_gepa.custom_instruction_proposer is proposer
+
+
+def test_template_proposer_fills_template_and_extracts_instruction(monkeypatch):
+    prompts = []
+
+    def fake_lm(prompt):
+        prompts.append(prompt)
+        return ["```\nNEW RULES\n```"]
+
+    monkeypatch.setattr(train.dspy.settings, "lm", fake_lm, raising=False)
+    proposer = train.TemplateInstructionProposer("CUR=<curr_param> INFO=<side_info>")
+    out = proposer({"generate": "OLD"}, {"generate": [{"Feedback": "bad"}]}, ["generate"])
+    assert out == {"generate": "NEW RULES"}
+    assert prompts[0].startswith("CUR=OLD INFO=") and "bad" in prompts[0]

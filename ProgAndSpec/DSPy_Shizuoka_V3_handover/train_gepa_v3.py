@@ -24,6 +24,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import dspy
+from gepa.strategies.instruction_proposal import InstructionProposalSignature
 
 BASE_DIR = Path(__file__).parent
 sys.path.insert(0, str(BASE_DIR / "src"))
@@ -201,6 +202,37 @@ def build_demonstrations(
     return demos
 
 
+class TemplateInstructionProposer:
+    """GEPA 既定の指示文提案を、反省プロンプトだけ差し替えて行う ProposalFn。
+
+    Why not gepa_kwargs["reflection_prompt_template"]: dspy.GEPA は DspyAdapter が独自に提案するため
+    この引数を受け付けず、初期化で ValueError になる。
+    """
+
+    def __init__(self, template: str):
+        InstructionProposalSignature.validate_prompt_template(template)
+        self.template = template
+
+    def __call__(self, candidate, reflective_dataset, components_to_update):
+        lm = dspy.settings.lm  # dspy.GEPA が reflection_lm の context で呼ぶ
+
+        def call(prompt):
+            output = lm(prompt)[0]
+            return output["text"] if isinstance(output, dict) else output
+
+        return {
+            name: InstructionProposalSignature.run(
+                lm=call,
+                input_dict={
+                    "current_instruction_doc": candidate[name],
+                    "dataset_with_feedback": reflective_dataset[name],
+                    "prompt_template": self.template,
+                },
+            )["new_instruction"]
+            for name in components_to_update
+        }
+
+
 def run_gepa_training(
     train_raw,
     val_raw,
@@ -265,9 +297,9 @@ def run_gepa_training(
 
     max_evals = breadth * depth
 
-    gepa_kwargs = {}
+    proposer = None
     if reflection_template:
-        gepa_kwargs["reflection_prompt_template"] = reflection_template
+        proposer = TemplateInstructionProposer(reflection_template)
         logger.info(f"Custom reflection prompt template ({len(reflection_template)} chars)")
     optimizer = dspy.GEPA(
         metric=gepa_feedback_v3,
@@ -277,7 +309,7 @@ def run_gepa_training(
         log_dir=log_dir,
         seed=42,
         num_threads=num_threads,
-        gepa_kwargs=gepa_kwargs or None,
+        instruction_proposer=proposer,
     )
 
     compiled = optimizer.compile(
