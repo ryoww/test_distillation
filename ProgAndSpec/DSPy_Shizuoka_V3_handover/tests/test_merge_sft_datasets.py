@@ -28,3 +28,20 @@ def test_merge_repeats_train_only_and_keeps_training_columns(tmp_path):
 def test_parse_input_defaults_repeat_to_one():
     assert parse_input("hard=data/x*2")[2] == 2
     assert parse_input("tpl=data/sft")[2] == 1
+
+
+def test_merge_replaces_system_message_when_given(tmp_path):
+    row = {
+        "messages": [
+            {"role": "system", "content": "OLD"},
+            {"role": "user", "content": "Q"},
+            {"role": "assistant", "content": "A"},
+        ],
+        "tools": None,
+    }
+    _write(tmp_path / "a", "train", [row])
+    _write(tmp_path / "a", "validation", [row])
+
+    merged = merge([("a", tmp_path / "a", 1)], seed=0, system="NEW")
+
+    assert [m["content"] for m in merged["train"][0]["messages"]] == ["NEW", "Q", "A"]

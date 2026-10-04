@@ -36,6 +36,8 @@ REASONING_PARSER="${REASONING_PARSER:-qwen3}"
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
 EXCLUDE_TEMPLATED_DIRS="${EXCLUDE_TEMPLATED_DIRS:-}"
 SYSTEM_PREFIX_FILE="${SYSTEM_PREFIX_FILE:-}"
+# GEPA で進化させた指示文を system に使うとき（交互最適化の評価）。
+INSTRUCTION_FILE="${INSTRUCTION_FILE:-}"
 EVAL_TIMEOUT="${EVAL_TIMEOUT:-600}"
 EXEC_TIMEOUT="${EXEC_TIMEOUT:-60}"
 HANDOVER_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
@@ -128,6 +130,7 @@ for data_dir in $DATA_DIRS; do
         [[ "$excluded" == "$data_dir" ]] && dir_args+=(--exclude-templated)
     done
     if [[ -n "$SYSTEM_PREFIX_FILE" ]]; then dir_args+=(--system-prefix-file "$SYSTEM_PREFIX_FILE"); fi
+    if [[ -n "$INSTRUCTION_FILE" ]]; then dir_args+=(--instruction-file "$INSTRUCTION_FILE"); fi
     echo "[$(date +%T)] evaluating $tag ${dir_args[*]:-}"
     uv run python scripts/evaluate_solver_model.py \
         --data-dir "$data_dir" \

@@ -54,6 +54,11 @@ def parse_args() -> argparse.Namespace:
         help="system 指示文の前に置くテキスト（例: Ministral Reasoning が思考を開くための推奨 system prompt）",
     )
     parser.add_argument(
+        "--instruction-file",
+        type=Path,
+        help="既定の指示文の代わりに system に入れる指示文（GEPA で進化させたものなど）",
+    )
+    parser.add_argument(
         "--exclude-templated",
         action="store_true",
         help="雛形化済み（SFT の教師データに含まれる種別）の問題を除く。汎化の測定用",
@@ -197,6 +202,8 @@ def main() -> int:
     if args.limit:
         examples = examples[: args.limit]
     instruction = AlgorithmGenerator().generate.predict.signature.instructions
+    if args.instruction_file:
+        instruction = args.instruction_file.read_text(encoding="utf-8")
     if args.system_prefix_file:
         # Why: Ministral 3 Reasoning は system が無いときだけ思考用の既定 system を差し込む。
         # 我々の指示文を system に置くとそれが消えるので、推奨文を前置して思考の条件を保つ。

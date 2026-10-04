@@ -54,6 +54,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--workers", type=int, default=24)
     parser.add_argument("--timeout", type=float, default=900.0)
+    parser.add_argument(
+        "--instruction-file", type=Path, help="system に入れる指示文（省略時は既定の指示文）"
+    )
     return parser.parse_args()
 
 
@@ -201,7 +204,11 @@ def main() -> None:
                 pairs.append((Path(record_path).stem, key, "replay", verdict))
         print("replay:", dict(replay_verdicts))
 
-    instruction = AlgorithmGenerator().generate.predict.signature.instructions
+    instruction = (
+        args.instruction_file.read_text(encoding="utf-8")
+        if args.instruction_file
+        else AlgorithmGenerator().generate.predict.signature.instructions
+    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     stats: dict = {"max_gap": args.max_gap, "replay": args.replay, "splits": {}}
     for split in ("train", "validation"):

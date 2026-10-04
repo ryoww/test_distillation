@@ -28,7 +28,16 @@ def parse_input(spec: str) -> tuple[str, Path, int]:
     return label, Path(path), int(repeat or 1)
 
 
-def merge(inputs: list[tuple[str, Path, int]], seed: int) -> dict[str, list[dict]]:
+def with_system(messages: list[dict], system: str | None) -> list[dict]:
+    """system メッセージを差し替える（GEPA で進化させた指示文で学習し直すとき）。"""
+    if system is None:
+        return messages
+    return [{"role": "system", "content": system}] + [m for m in messages if m["role"] != "system"]
+
+
+def merge(
+    inputs: list[tuple[str, Path, int]], seed: int, system: str | None = None
+) -> dict[str, list[dict]]:
     merged: dict[str, list[dict]] = {split: [] for split in SPLITS}
     for label, directory, repeat in inputs:
         for split in SPLITS:
@@ -40,7 +49,11 @@ def merge(inputs: list[tuple[str, Path, int]], seed: int) -> dict[str, list[dict
             times = repeat if split == "train" else 1
             for row in rows * times:
                 merged[split].append(
-                    {"messages": row["messages"], "tools": row.get("tools"), "source": label}
+                    {
+                        "messages": with_system(row["messages"], system),
+                        "tools": row.get("tools"),
+                        "source": label,
+                    }
                 )
     # Why not 出典ごとの連結のまま: Trainer は既定で shuffle するが、検証側の先頭 N 件だけを
     # 使う --max-eval-samples が片方の出典に偏るので、ここで並びを混ぜておく。
@@ -55,12 +68,18 @@ def main() -> None:
     parser.add_argument("--input", action="append", required=True, help="label=dir[*N]")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--system-file", type=Path, help="全行の system をこの指示文に差し替える")
     args = parser.parse_args()
 
     inputs = [parse_input(spec) for spec in args.input]
-    merged = merge(inputs, args.seed)
+    system = args.system_file.read_text(encoding="utf-8") if args.system_file else None
+    merged = merge(inputs, args.seed, system)
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    stats: dict = {"inputs": [f"{l}={p}*{n}" for l, p, n in inputs], "splits": {}}
+    stats: dict = {
+        "inputs": [f"{l}={p}*{n}" for l, p, n in inputs],
+        "system_file": str(args.system_file) if args.system_file else None,
+        "splits": {},
+    }
     for split, rows in merged.items():
         (args.output_dir / f"{split}.jsonl").write_text(
             "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8"
