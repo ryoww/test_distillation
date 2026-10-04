@@ -212,8 +212,8 @@ LoRA だけ長い最大長で学習するのが対策です。
 | LoRA adapter | `outputs/gemma4-12b-merged-lora-20261004/adapter` | 0.5 GB |
 | LoRA 焼き込み済み（vLLM で配信可） | `/var/tmp/yy-lab-ft/gemma4-12b-merged-lora-20261004-merged` | 23 GB |
 | FFT（bf16 で保存、vLLM で配信可） | `/var/tmp/yy-lab-ft/gemma4-12b-merged-fft-fp32-20261004/adapter` | 23 GB |
-| FFT の途中保存（fp32 + optimizer、2 個） | `/var/tmp/yy-lab-ft/gemma4-12b-merged-fft-fp32-20261004/checkpoints` | 146 GB |
-| FFT 1 回目（失敗、比較用） | `/var/tmp/yy-lab-ft/gemma4-12b-merged-fft-20261004/adapter` | 23 GB |
+
+FFT の途中保存（fp32 + optimizer）、失敗した 1 回目の重み、試験用の出力は 2026-10-05 に消した（学習の記録と評価結果は残してある）。
 
 **Q15. 次に何をするか。**
 1. 欠けている 3 種別（乗務員ペアリング、ポートフォリオ 2 種）を学習データに入れる（検証器の修正、問題文の短縮）。
