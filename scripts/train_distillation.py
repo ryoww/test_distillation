@@ -91,6 +91,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--lora-dropout", type=float, default=0.05)
     parser.add_argument("--learning-rate", type=float, default=2e-5)
+    parser.add_argument(
+        "--optim",
+        default="adamw_torch_fused",
+        help="transformers の optimizer 名。12B の全層学習は paged_adamw_8bit で GPU 1 枚に収める。",
+    )
     parser.add_argument("--warmup-steps", type=int, default=100)
     parser.add_argument("--num-train-epochs", type=float, default=1.0)
     parser.add_argument("--max-steps", type=int, default=-1)
@@ -296,7 +301,7 @@ def main() -> None:
         tf32=True,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
-        optim="adamw_torch_fused",
+        optim=args.optim,
         logging_steps=args.logging_steps,
         save_strategy="steps",
         save_steps=args.save_steps,
