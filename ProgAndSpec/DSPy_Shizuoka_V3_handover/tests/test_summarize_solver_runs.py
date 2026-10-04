@@ -1,4 +1,4 @@
-from scripts.summarize_solver_runs import gap_of, summarize
+from scripts.summarize_solver_runs import gap_of, is_correct, summarize
 
 
 def _row(status, cost, ref, score=1.0):
@@ -22,3 +22,8 @@ def test_correct_requires_feasible_status_and_gap_within_limit():
 def test_zero_reference_counts_only_zero_cost():
     assert gap_of(_row("exact_match", 0.0, 0.0)) == 0.0
     assert gap_of(_row("worse", 1.0, 0.0)) == float("inf")
+
+
+def test_exact_reference_match_is_correct():
+    assert is_correct(_row("exact_match", 100.0, 100.0), max_gap=0.10)
+    assert not is_correct(_row("infeasible", 100.0, 100.0), max_gap=0.10)

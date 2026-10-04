@@ -38,6 +38,11 @@ def gap_of(row: dict) -> float | None:
     return (cost - ref) / abs(ref)
 
 
+def is_correct(row: dict, max_gap: float) -> bool:
+    gap = gap_of(row)
+    return gap is not None and gap <= max_gap
+
+
 def summarize(rows: list[dict], max_gap: float) -> dict:
     gaps = [gap_of(r) for r in rows]
     feasible = [g for g in gaps if g is not None]
@@ -77,8 +82,8 @@ def main() -> None:
         pair = "—"
         if label != base_label:
             shared = sorted(set(rows) & set(base_rows))
-            ok = {iid: (gap_of(rows[iid]) or 9) <= args.max_gap for iid in shared}
-            ok_base = {iid: (gap_of(base_rows[iid]) or 9) <= args.max_gap for iid in shared}
+            ok = {iid: is_correct(rows[iid], args.max_gap) for iid in shared}
+            ok_base = {iid: is_correct(base_rows[iid], args.max_gap) for iid in shared}
             pair = (
                 f"{sum(ok[i] and ok_base[i] for i in shared)} / "
                 f"{sum(ok_base[i] and not ok[i] for i in shared)} / "
