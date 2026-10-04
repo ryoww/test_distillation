@@ -584,6 +584,12 @@ MODEL_PATH=../../outputs/<run>/merged LABEL=sft__agents_a1_4b sbatch --export=AL
   prob_009, 014, 015, 016, 017, 018, 027, 029, 030, 069, 080 の 11 問で、そのうち数値目的があるのは
   6 問しかありません。雛形外の汎化を今後も測るなら、雛形の一部を学習から外して（`--templates` で
   雛形を絞り、評価側は外した雛形の生成問題を使う）測ります。
+- **全層学習（FFT）は fp32 の主重みで行います。** bf16 の重みのまま `--full-finetune` すると、学習率 1e-5 の更新が
+  丸めで消えて学習が進みません（`RESCORE_REPORT.md` 28 章）。12B では
+  `--full-finetune --fp32-weights --model-parallel --max-memory {"0":"16GiB","1":"60GiB"} --optim adamw_bnb_8bit` を
+  `EXTRA_ARGS` に渡し、`sbatch --gres=gpu:2 --mem=200G` で GPU 2 枚に分けます。保存は bf16 で、`processor_config.json` は
+  評価の前に土台のスナップショットから写します。複数の SFT データは `scripts/merge_sft_datasets.py` でまとめ、
+  評価は `scripts/summarize_solver_runs.py` で学習データと同じ基準の正解数にします。
 
 ### 9.1 他の候補モデルを同じ枡で測る
 
