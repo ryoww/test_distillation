@@ -16,6 +16,13 @@
 #   RUN_NAME=gepa-compact-YYYYMMDD sbatch --export=ALL scripts/slurm_gepa_retrain.sbatch
 #
 # 学習済みプログラムは outputs/${RUN_NAME}/compiled_program_v3_gepa_phaseE.json に出る。
+#
+# 大規模生成問題で回すとき（生成も反省も Qwen3.8、分割済みデータ、8 時間を超えたら同じ RUN_NAME で再投入）:
+#   RUN_NAME=gepa-hard-YYYYMMDD GEN_ROLE=reflection BREADTH=3 DEPTH=2 RESUME=1 \
+#   GEPA_ARGS="--data-dir data/problems_hard_gen --split-dirs --per-kind-train 1 --per-kind-val 1 \
+#     --per-kind-test 0 --exec-timeout 600 --seed-instruction-file prompts/seed_instruction_hard.md \
+#     --reflection-template prompts/reflection_template_general.md --skip-final-eval --no-demos" \
+#     sbatch --export=ALL scripts/slurm_gepa_retrain.sbatch
 set -euo pipefail
 
 : "${QWEN_HF_HOME:?set QWEN_HF_HOME to the Hugging Face cache holding both Qwen models}"
@@ -27,6 +34,10 @@ RUN_NAME="${RUN_NAME:-gepa-compact-$(date +%Y%m%d)}"
 BREADTH="${BREADTH:-6}"
 DEPTH="${DEPTH:-8}"
 NUM_THREADS="${NUM_THREADS:-8}"
+# 生成に使うモデルの役割（model_manifest.json のキー）。reflection にすると生成も Qwen3.8 になる。
+GEN_ROLE="${GEN_ROLE:-generation}"
+GEPA_ARGS="${GEPA_ARGS:-}"
+RESUME="${RESUME:-0}"
 READY_TIMEOUT_SEC="${READY_TIMEOUT_SEC:-1800}"
 LOG_DIR="$HANDOVER_DIR/outputs/slurm/$RUN_NAME"
 mkdir -p "$LOG_DIR"
@@ -35,15 +46,16 @@ cd "$HANDOVER_DIR"
 manifest_field() {
     uv run python -c "import json,sys; m=json.load(open('model_manifest.json')); print(m[sys.argv[1]][sys.argv[2]])" "$1" "$2"
 }
-GEN_MODEL="$(manifest_field generation model_id)"
-GEN_REV="$(manifest_field generation revision)"
+GEN_MODEL="$(manifest_field "$GEN_ROLE" model_id)"
+GEN_REV="$(manifest_field "$GEN_ROLE" revision)"
 REF_MODEL="$(manifest_field reflection model_id)"
 REF_REV="$(manifest_field reflection revision)"
 GEN_PORT=7501
 REF_PORT=7502
 
 echo "[$(date +%T)] job $SLURM_JOB_ID on $(hostname); GPUs: ${CUDA_VISIBLE_DEVICES:-unset}"
-echo "[$(date +%T)] run=$RUN_NAME breadth=$BREADTH depth=$DEPTH threads=$NUM_THREADS"
+echo "[$(date +%T)] run=$RUN_NAME breadth=$BREADTH depth=$DEPTH threads=$NUM_THREADS gen=$GEN_MODEL resume=$RESUME"
+echo "[$(date +%T)] extra args: $GEPA_ARGS"
 
 start_server() {
     # $1: GPU index inside the allocation, $2: model, $3: revision, $4: port
@@ -88,13 +100,23 @@ trap 'echo "[$(date +%T)] stopping servers"; kill "$GEN_PID" "$REF_PID" 2>/dev/n
 wait_ready "$GEN_PORT" "$GEN_MODEL"
 wait_ready "$REF_PORT" "$REF_MODEL"
 
-uv run python scripts/preflight.py > "$LOG_DIR/preflight.json"
-echo "[$(date +%T)] preflight ok: $(uv run python -c "import json;print(json.load(open('$LOG_DIR/preflight.json'))['ok'])")"
+# Why not preflight を常に: preflight は manifest の生成モデル（Qwen3.6）が 7501 にいることを確かめる。
+# 生成に別の役割を使うときは配信しているモデルが違うので、疎通は train_gepa_v3 の接続確認に任せる。
+if [[ "$GEN_ROLE" == "generation" ]]; then
+    uv run python scripts/preflight.py > "$LOG_DIR/preflight.json"
+    echo "[$(date +%T)] preflight ok: $(uv run python -c "import json;print(json.load(open('$LOG_DIR/preflight.json'))['ok'])")"
+fi
+RESUME_ARGS=()
+if [[ "$RESUME" == "1" ]]; then RESUME_ARGS=(--resume); fi
 
 echo "[$(date +%T)] starting GEPA training"
+# shellcheck disable=SC2086 # GEPA_ARGS is a space-separated option list
 uv run python train_gepa_v3.py \
     --run-name "$RUN_NAME" \
     --breadth "$BREADTH" --depth "$DEPTH" \
     --num-threads "$NUM_THREADS" \
-    2>&1 | tee "$LOG_DIR/train.log"
+    --generation-model "$GEN_MODEL" --generation-api-base "http://127.0.0.1:$GEN_PORT/v1" \
+    --reflection-model "$REF_MODEL" --reflection-api-base "http://127.0.0.1:$REF_PORT/v1" \
+    "${RESUME_ARGS[@]}" $GEPA_ARGS \
+    2>&1 | tee -a "$LOG_DIR/train.log"
 echo "[$(date +%T)] done: outputs/$RUN_NAME/compiled_program_v3_gepa_phaseE.json"

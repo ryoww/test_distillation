@@ -135,6 +135,32 @@ def load_and_split(
     return train, test
 
 
+def load_split_dirs(
+    data_dir: str,
+    per_kind: dict[str, int],
+    *,
+    use_reference: bool = True,
+) -> dict[str, list[dict]]:
+    """data_dir/{train,validation,test} を読み、分割ごとに種別あたり先頭 N 件を返す（0 は全件）。
+
+    種別は生成問題の provenance.kind、無ければ core_type。id 順に並べて先頭から取るので決定的。
+    """
+    out: dict[str, list[dict]] = {}
+    for split, limit in per_kind.items():
+        records = load_v3_data(os.path.join(data_dir, split))
+        groups: dict[str, list[dict]] = {}
+        for record in sorted(records, key=lambda r: r["id"]):
+            kind = (record.get("provenance") or {}).get("kind") or (
+                f"{record.get('domain')}_{record.get('math_type')}"
+            )
+            groups.setdefault(kind, []).append(record)
+        picked = [
+            r for kind in sorted(groups) for r in (groups[kind][:limit] if limit else groups[kind])
+        ]
+        out[split] = [convert_to_dspy_example(r, use_reference=use_reference) for r in picked]
+    return out
+
+
 def load_and_split_stratified(
     data_dir: str,
     n_train: int = 40,

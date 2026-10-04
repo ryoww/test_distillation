@@ -33,11 +33,12 @@ from src.best_known import init_registry
 from src.data_loader import (
     convert_to_dspy_example,
     load_and_split_stratified,
+    load_split_dirs,
     load_v3_data,
     prepare_examples,
     split_train_val_stratified,
 )
-from src.gepa_feedback_v3 import gepa_feedback_v3, set_use_reference
+from src.gepa_feedback_v3 import gepa_feedback_v3, set_exec_timeout, set_use_reference
 from src.lm_config import (
     DEFAULT_GENERATION_API_BASE,
     DEFAULT_GENERATION_MODEL,
@@ -211,8 +212,16 @@ def run_gepa_training(
     reflection_lm=None,
     output_dir=BASE_DIR / "outputs",
     num_threads=8,
+    seed_instruction=None,
+    reflection_template=None,
+    log_dir=None,
 ):
-    """GEPAによる最適化訓練。"""
+    """GEPAによる最適化訓練。
+
+    seed_instruction: 生成器の初期指示文を差し替える（None なら signatures.py の既定）。
+    reflection_template: GEPA の反省プロンプト（<curr_param> と <side_info> を含む）。
+    log_dir: 既存の GEPA ログを指すと、gepa_state.bin から続きを再開する。
+    """
 
     # Convert to DSPy examples
     train_examples = prepare_examples(train_raw)
@@ -231,13 +240,17 @@ def run_gepa_training(
     if demos:
         program.generate.predict.demos = list(demos)
         logger.info(f"Attached {len(demos)} demonstrations to generate predictor")
+    if seed_instruction:
+        sig = program.generate.predict.signature
+        program.generate.predict.signature = sig.with_instructions(seed_instruction)
+        logger.info(f"Seed instruction replaced ({len(seed_instruction)} chars)")
 
     n_predictors = len(program.predictors())
     logger.info(f"Predictors: {n_predictors} (parse frozen, generate+improve trainable)")
 
     ts = time.strftime("%Y%m%d_%H%M%S")
     output_dir = Path(output_dir)
-    log_dir = str(output_dir / "gepa_logs" / f"run_v3_{ts}")
+    log_dir = str(log_dir or output_dir / "gepa_logs" / f"run_v3_{ts}")
     os.makedirs(log_dir, exist_ok=True)
     out_json = str(output_dir / f"compiled_program_v3_gepa_{out_tag}.json")
 
@@ -252,6 +265,10 @@ def run_gepa_training(
 
     max_evals = breadth * depth
 
+    gepa_kwargs = {}
+    if reflection_template:
+        gepa_kwargs["reflection_prompt_template"] = reflection_template
+        logger.info(f"Custom reflection prompt template ({len(reflection_template)} chars)")
     optimizer = dspy.GEPA(
         metric=gepa_feedback_v3,
         reflection_lm=reflection_lm or dspy.settings.lm,
@@ -260,6 +277,7 @@ def run_gepa_training(
         log_dir=log_dir,
         seed=42,
         num_threads=num_threads,
+        gepa_kwargs=gepa_kwargs or None,
     )
 
     compiled = optimizer.compile(
@@ -477,6 +495,36 @@ def parse_args(argv=None):
         help="データディレクトリ（100問）",
     )
     parser.add_argument("--n-train", type=int, default=40, help="訓練問題数(層化選抜)")
+    parser.add_argument(
+        "--split-dirs",
+        action="store_true",
+        help="data-dir の train/validation/test を分割として使う（生成問題集用）",
+    )
+    parser.add_argument(
+        "--per-kind-train", type=int, default=0, help="--split-dirs: 種別あたり（0 は全件）"
+    )
+    parser.add_argument(
+        "--per-kind-val", type=int, default=0, help="--split-dirs: 種別あたり（0 は全件）"
+    )
+    parser.add_argument(
+        "--per-kind-test", type=int, default=0, help="--split-dirs: 種別あたり（0 は全件）"
+    )
+    parser.add_argument("--seed-instruction-file", type=Path, help="生成器の初期指示文を差し替える")
+    parser.add_argument(
+        "--reflection-template",
+        type=Path,
+        help="GEPA の反省プロンプト（<curr_param>, <side_info> を含む）",
+    )
+    parser.add_argument(
+        "--skip-final-eval",
+        action="store_true",
+        help="学習後の train/test 評価を省く（保存したプログラムを別ジョブで評価する）",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="既存の run ディレクトリを再利用し、その GEPA ログから再開する（Slurm の 8 時間上限をまたぐ）",
+    )
     parser.add_argument("--n-test", type=int, default=20, help="テスト問題数(層化選抜)")
     parser.add_argument("--train-ratio", type=float, default=0.8, help="(旧)訓練データの割合")
     parser.add_argument("--no-demos", action="store_true", help="few-shot demoを無効化")
@@ -552,6 +600,7 @@ def main(argv=None):
 
     use_reference = not args.no_reference
     set_use_reference(use_reference)
+    set_exec_timeout(args.exec_timeout)
     out_tag = "phaseE" if use_reference else "phaseF_noref"
     run_name = args.run_name or f"{out_tag}_{time.strftime('%Y%m%d_%H%M%S')}"
     run_dir = args.output_dir.resolve() / run_name
@@ -599,7 +648,7 @@ def main(argv=None):
         except Exception as exc:
             logger.error("LM connection check failed: %s", exc)
             raise SystemExit(2) from exc
-    run_dir.mkdir(parents=True, exist_ok=False)
+    run_dir.mkdir(parents=True, exist_ok=args.resume)
 
     state_name = "best_known.jsonl" if use_reference else "best_known_noref.jsonl"
     storage = run_dir / state_name
@@ -608,18 +657,31 @@ def main(argv=None):
 
     # Load data (stratified 40/20 across core_types)
     logger.info(f"\nLoading data from {args.data_dir}...")
-    train_raw, test_raw = load_and_split_stratified(
-        args.data_dir,
-        n_train=args.n_train,
-        n_test=args.n_test,
-        seed=42,
-        use_reference=use_reference,
-    )
-    logger.info(f"Train+Val: {len(train_raw)}, Test: {len(test_raw)}")
+    if args.split_dirs:
+        splits = load_split_dirs(
+            args.data_dir,
+            {
+                "train": args.per_kind_train,
+                "validation": args.per_kind_val,
+                "test": args.per_kind_test,
+            },
+            use_reference=use_reference,
+        )
+        train_only_raw, val_raw, test_raw = splits["train"], splits["validation"], splits["test"]
+        n_val = len(val_raw)
+    else:
+        train_raw, test_raw = load_and_split_stratified(
+            args.data_dir,
+            n_train=args.n_train,
+            n_test=args.n_test,
+            seed=42,
+            use_reference=use_reference,
+        )
+        logger.info(f"Train+Val: {len(train_raw)}, Test: {len(test_raw)}")
 
-    # Split train into train/val (larger val for stronger GEPA signal)
-    n_val = max(3, len(train_raw) // 3)
-    train_only_raw, val_raw = split_train_val_stratified(train_raw, n_val, seed=42)
+        # Split train into train/val (larger val for stronger GEPA signal)
+        n_val = max(3, len(train_raw) // 3)
+        train_only_raw, val_raw = split_train_val_stratified(train_raw, n_val, seed=42)
     logger.info(f"Train: {len(train_only_raw)}, Val: {n_val}, Test: {len(test_raw)}")
 
     # Print core_type distribution
@@ -688,20 +750,37 @@ def main(argv=None):
             reflection_lm=reflection_lm,
             output_dir=run_dir,
             num_threads=args.num_threads,
+            seed_instruction=(
+                args.seed_instruction_file.read_text(encoding="utf-8").strip()
+                if args.seed_instruction_file
+                else None
+            ),
+            reflection_template=(
+                args.reflection_template.read_text(encoding="utf-8")
+                if args.reflection_template
+                else None
+            ),
+            log_dir=run_dir / "gepa_logs" / "run_v3" if args.resume else None,
         )
 
         # Evaluate
-        train_result = evaluate(
-            compiled, train_only_raw + val_raw, name="Train", use_reference=use_reference
-        )
-        test_result = evaluate(
-            compiled,
-            test_raw,
-            name="Test",
-            use_reference=use_reference,
-            max_repair_attempts=args.max_repair_attempts,
-            exec_timeout=args.exec_timeout,
-        )
+        if args.skip_final_eval:
+            # Why not 学習ジョブ内で評価: evaluate() は 1 問ずつ順に解くので、大規模問題では
+            # 数十時間かかる。保存したプログラムを compare の shard ジョブで並列に評価する。
+            logger.info("Skipping in-job evaluation (--skip-final-eval)")
+            train_result = test_result = {"skipped": True}
+        else:
+            train_result = evaluate(
+                compiled, train_only_raw + val_raw, name="Train", use_reference=use_reference
+            )
+            test_result = evaluate(
+                compiled,
+                test_raw,
+                name="Test",
+                use_reference=use_reference,
+                max_repair_attempts=args.max_repair_attempts,
+                exec_timeout=args.exec_timeout,
+            )
 
     results_path = run_dir / f"evaluation_results_v3_gepa_{out_tag}.json"
     results = {

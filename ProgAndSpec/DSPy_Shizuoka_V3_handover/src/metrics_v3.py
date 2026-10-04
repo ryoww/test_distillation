@@ -640,13 +640,19 @@ def evaluate_algorithm_v3(
         partial_score = feasibility_result.get("partial_score", 0.0)
         violation_count = feasibility_result.get("violation_count", 0)
         total_constraints = feasibility_result.get("total_constraints", 0)
+        # Why not 件数だけ: 大規模問題では「どの制約を破ったか」が直す手がかりで、
+        # GEPA の反省 LM も修復ループもこの文面しか見ない。先頭 3 件を添える。
+        first_violations = "; ".join(
+            str(v)[:160] for v in feasibility_result.get("violations", [])[:3]
+        )
+        violation_note = f": {first_violations}" if first_violations else ""
 
         # Give small credit for satisfying some constraints
         if partial_score > 0 and total_constraints > 0:
             return {
                 "score": min(partial_score * 0.3, 0.5),  # Cap at 0.5 for partial feasibility
                 "status": "partial_feasible",
-                "detail": f"constraint violation ({violation_count}/{total_constraints} violated, partial_score={partial_score:.2f})",
+                "detail": f"constraint violation ({violation_count}/{total_constraints} violated, partial_score={partial_score:.2f}){violation_note}",
                 "cost": feasibility_result.get("cost"),
                 "best_known": None,
                 "gap_to_reference": None,
@@ -659,7 +665,7 @@ def evaluate_algorithm_v3(
         return {
             "score": 0.0,
             "status": "infeasible",
-            "detail": f"constraint violation ({violation_count}/{total_constraints})",
+            "detail": f"constraint violation ({violation_count}/{total_constraints}){violation_note}",
             "cost": feasibility_result.get("cost"),
             "best_known": None,
             "gap_to_reference": None,

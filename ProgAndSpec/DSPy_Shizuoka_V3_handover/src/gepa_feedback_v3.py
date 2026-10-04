@@ -25,6 +25,15 @@ def set_use_reference(flag: bool) -> None:
     USE_REFERENCE = bool(flag)
 
 
+# 生成コードの実行打ち切り秒数。大規模問題では train スクリプトが問題文の上限に合わせて上書きする。
+EXEC_TIMEOUT = 60.0
+
+
+def set_exec_timeout(seconds: float) -> None:
+    global EXEC_TIMEOUT
+    EXEC_TIMEOUT = float(seconds)
+
+
 # core_typeに応じた改善提案
 _ALGORITHM_HINTS = {
     "スケジューリング_動的計画法": (
@@ -136,6 +145,7 @@ def gepa_feedback_v3(example, pred, trace=None, pred_name=None, pred_trace=None)
         reference_solution=ref_sol,
         objective_text=objective_text,
         use_reference=USE_REFERENCE,
+        timeout=EXEC_TIMEOUT,
     )
     score = result["score"]
     cost = result.get("cost")
@@ -260,7 +270,7 @@ def gepa_feedback_v3(example, pred, trace=None, pred_name=None, pred_trace=None)
     elif status == "infeasible":
         detail = result.get("detail", "")
         feedback = (
-            f"INFEASIBLE ({detail[:150]}). Constraint violation for {core_type}. "
+            f"INFEASIBLE ({detail[:500]}). Constraint violation for {core_type}. "
             f"{ref_hint} "
             f"ACTION: Check your constraint handling — capacity, time windows, precedence, coverage. "
             f"Ensure every required item is assigned exactly once. "
@@ -339,7 +349,7 @@ def gepa_feedback_v3(example, pred, trace=None, pred_name=None, pred_trace=None)
     elif status == "infeasible":
         detail = result.get("detail", "")
         feedback = (
-            f"INFEASIBLE ({detail[:150]}). Constraint violation for {core_type}. "
+            f"INFEASIBLE ({detail[:500]}). Constraint violation for {core_type}. "
             f"{ref_hint} "
             f"ACTION: Check your constraint handling — capacity limits, time windows, precedence, coverage. "
             f"Ensure every required item is assigned exactly once. "
@@ -349,7 +359,7 @@ def gepa_feedback_v3(example, pred, trace=None, pred_name=None, pred_trace=None)
     elif status == "partial_feasible":
         detail = result.get("detail", "")
         feedback = (
-            f"PARTIALLY FEASIBLE (score={score:.2f}, {detail[:150]}). "
+            f"PARTIALLY FEASIBLE (score={score:.2f}, {detail[:500]}). "
             f"Your solution satisfies most but not all constraints. "
             f"{ref_hint} "
             f"ACTION: Identify which constraint failed and add explicit handling — "
