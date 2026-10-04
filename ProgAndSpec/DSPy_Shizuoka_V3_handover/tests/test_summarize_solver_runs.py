@@ -1,0 +1,24 @@
+from scripts.summarize_solver_runs import gap_of, summarize
+
+
+def _row(status, cost, ref, score=1.0):
+    return {"status": status, "cost": cost, "reference_value": ref, "score": score, "usage": {}}
+
+
+def test_correct_requires_feasible_status_and_gap_within_limit():
+    rows = [
+        _row("exact_match", 100.0, 100.0),
+        _row("worse", 109.0, 100.0),
+        _row("worse", 120.0, 100.0),
+        _row("infeasible", 50.0, 100.0),
+        _row("unverified", 100.0, 100.0),
+    ]
+    summary = summarize(rows, max_gap=0.10)
+    assert summary["correct"] == 2
+    assert summary["at_least_reference"] == 1
+    assert summary["feasible"] == 3
+
+
+def test_zero_reference_counts_only_zero_cost():
+    assert gap_of(_row("exact_match", 0.0, 0.0)) == 0.0
+    assert gap_of(_row("worse", 1.0, 0.0)) == float("inf")
