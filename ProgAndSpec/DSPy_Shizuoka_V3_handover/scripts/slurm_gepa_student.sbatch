@@ -14,7 +14,8 @@
 #   export QWEN_HF_HOME=/home/yy-lab/test_DSPy/model/hf_home QWEN_VLLM_ENV=/home/yy-lab/test_DSPy/.runtime/vllm/vllm-cu13
 #   STUDENT_PATH=/var/tmp/yy-lab-ft/<merged> RUN_DIR=outputs/bt-r1/gepa sbatch --export=ALL scripts/slurm_gepa_student.sbatch
 #
-# 上書きできる環境変数: GEPA_ARGS（gepa_student.py に足す引数）、RESUME=1（同じ RUN_DIR で続きから）
+# 上書きできる環境変数: GEPA_ARGS（gepa_student.py に足す引数）、RESUME=1（同じ RUN_DIR で続きから）、
+# SHARE_GPU=1（student と反省 LM を同じ GPU に載せる。`sbatch --gres=gpu:1` と組み合わせる）
 set -euo pipefail
 
 : "${STUDENT_PATH:?set STUDENT_PATH to the merged student model directory}"
@@ -27,6 +28,14 @@ STUDENT_VLLM_ENV="${STUDENT_VLLM_ENV:-$ROOT_DIR/.runtime/vllm-0.28}"
 GEPA_ARGS="${GEPA_ARGS:-}"
 RESUME="${RESUME:-0}"
 READY_TIMEOUT_SEC="${READY_TIMEOUT_SEC:-1800}"
+# Why not 常に 2 枚: 共有ノードで GPU が 1 枚ずつしか空かないと、2 枚要求のジョブは両方空くまで待ち続ける。
+# 12B の student（約 24 GB）と 27B の反省 LM（約 52 GB）は H200 1 枚に収まるので、配分を分けて同居させる。
+SHARE_GPU="${SHARE_GPU:-0}"
+if [[ "$SHARE_GPU" == "1" ]]; then
+    STU_GPU=0; REF_GPU=0; STU_UTIL=0.33; REF_UTIL=0.55
+else
+    STU_GPU=0; REF_GPU=1; STU_UTIL=0.85; REF_UTIL=0.85
+fi
 STU_PORT=$((7600 + ${SLURM_JOB_ID:-0} % 50))
 REF_PORT=$((STU_PORT + 50))
 LOG_DIR="$HANDOVER_DIR/$RUN_DIR/logs"
@@ -45,39 +54,44 @@ if [[ -f "$CURAND_INC/curand_kernel.h" ]]; then export NVCC_APPEND_FLAGS="${NVCC
 
 (
     cd "$ROOT_DIR"
-    CUDA_VISIBLE_DEVICES=0 exec setsid uv run scripts/serve_vllm.py --vllm-env-dir "$STUDENT_VLLM_ENV" \
+    CUDA_VISIBLE_DEVICES=$STU_GPU exec setsid uv run scripts/serve_vllm.py --vllm-env-dir "$STUDENT_VLLM_ENV" \
         --model-path "$STUDENT_PATH" --served-model-name student --port "$STU_PORT" \
-        --max-model-len 53248 --gpu-memory-utilization 0.85 --max-num-seqs 16 \
+        --max-model-len 53248 --gpu-memory-utilization "$STU_UTIL" --max-num-seqs 16 \
         --disable-log-stats --disable-uvicorn-access-log --reasoning-parser gemma4
 ) > "$LOG_DIR/vllm_student.log" 2>&1 &
 STU_PID=$!
+REF_PID=""
+stop_servers() {
+    echo "[$(date +%T)] stopping servers"
+    for pid in "$STU_PID" $REF_PID; do kill -TERM -- "-$pid" 2>/dev/null || true; done
+    wait "$STU_PID" $REF_PID 2>/dev/null || true
+}
+trap stop_servers EXIT
+wait_ready() {
+    local waited=0
+    until curl -sf -H "Authorization: Bearer local" "http://127.0.0.1:$1/v1/models" > /dev/null; do
+        if (( waited >= READY_TIMEOUT_SEC )); then echo "server on $1 not ready" >&2; exit 1; fi
+        sleep 15; waited=$((waited + 15))
+    done
+    echo "[$(date +%T)] server on $1 ready after ${waited}s"
+}
+# vLLM は起動時に空きメモリを確かめるので、同じ GPU に載せるときは student が載り切ってから反省 LM を起こす。
+if [[ "$SHARE_GPU" == "1" ]]; then wait_ready "$STU_PORT"; fi
 (
     cd "$ROOT_DIR"
-    HF_HOME="$QWEN_HF_HOME" CUDA_VISIBLE_DEVICES=1 \
+    HF_HOME="$QWEN_HF_HOME" CUDA_VISIBLE_DEVICES=$REF_GPU \
     VLLM_USE_DEEP_GEMM=0 VLLM_MOE_USE_DEEP_GEMM=0 VLLM_DEEP_GEMM_WARMUP=skip \
     exec setsid uv run scripts/serve_vllm.py --vllm-env-dir "$QWEN_VLLM_ENV" \
         --model-path "$REF_MODEL" --model-revision "$REF_REV" --served-model-name "$REF_MODEL" \
         --port "$REF_PORT" --max-model-len 131072 \
         --speculative-config '{"method":"mtp","num_speculative_tokens":1}' \
-        --gpu-memory-utilization 0.85 --max-num-seqs 16 --disable-log-stats \
+        --gpu-memory-utilization "$REF_UTIL" --max-num-seqs 16 --disable-log-stats \
         --disable-uvicorn-access-log --generation-config vllm --reasoning-parser qwen3
 ) > "$LOG_DIR/vllm_reflection.log" 2>&1 &
 REF_PID=$!
-stop_servers() {
-    echo "[$(date +%T)] stopping servers"
-    kill -TERM -- "-$STU_PID" "-$REF_PID" 2>/dev/null || true
-    wait "$STU_PID" "$REF_PID" 2>/dev/null || true
-}
-trap stop_servers EXIT
 
-for port in "$STU_PORT" "$REF_PORT"; do
-    waited=0
-    until curl -sf -H "Authorization: Bearer local" "http://127.0.0.1:$port/v1/models" > /dev/null; do
-        if (( waited >= READY_TIMEOUT_SEC )); then echo "server on $port not ready" >&2; exit 1; fi
-        sleep 15; waited=$((waited + 15))
-    done
-    echo "[$(date +%T)] server on $port ready after ${waited}s"
-done
+wait_ready "$STU_PORT"
+wait_ready "$REF_PORT"
 
 RESUME_ARGS=()
 if [[ "$RESUME" == "1" ]]; then RESUME_ARGS=(--resume); fi
