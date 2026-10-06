@@ -95,5 +95,5 @@ def test_examples_with_instance_keep_the_metric_field_and_add_an_input():
         "requirement", "core_type"
     )
     out = sp.examples_with_instance([example])[0]
-    assert out.inputs().keys() == {"requirement", "core_type", "problem_instance"}
+    assert set(out.inputs().keys()) == {"requirement", "core_type", "problem_instance"}
     assert out.instance == {"n": 1} and out.problem_instance == {"n": 1}
