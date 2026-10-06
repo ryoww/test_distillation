@@ -41,6 +41,14 @@ INSTRUCTION_FILE="${INSTRUCTION_FILE:-}"
 # 生成→検証→修復の 2 段プログラムで測るとき（scripts/evaluate_student_program.py）。修復段の指示文を指す。
 # "default" を渡すと既定の修復指示文で、修復ループだけの効果を測る。
 REPAIR_INSTRUCTION_FILE="${REPAIR_INSTRUCTION_FILE:-}"
+MAX_REPAIRS="${MAX_REPAIRS:-1}"
+# フォールバック LM（student が通らないときに同じ手順で試す大きいモデル）。同じ GPU に 2 つ目の vLLM を立てる。
+FALLBACK_PATH="${FALLBACK_PATH:-}"
+FALLBACK_SERVED="${FALLBACK_SERVED:-fallback}"
+FALLBACK_REASONING_PARSER="${FALLBACK_REASONING_PARSER:-gemma4}"
+FALLBACK_THINKING="${FALLBACK_THINKING:-off}"
+# Why not 常に 0.85: フォールバックと同居させるときは、4B（約 10 GB）と 12B（約 24 GB）に KV の余地を足して分ける。
+if [[ -n "$FALLBACK_PATH" ]]; then GPU_UTIL="${GPU_UTIL:-0.30}"; FALLBACK_GPU_UTIL="${FALLBACK_GPU_UTIL:-0.50}"; else GPU_UTIL="${GPU_UTIL:-0.85}"; fi
 EVAL_TIMEOUT="${EVAL_TIMEOUT:-600}"
 EXEC_TIMEOUT="${EXEC_TIMEOUT:-60}"
 HANDOVER_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
@@ -72,7 +80,7 @@ mkdir -p "$LOG_DIR"
 echo "[$(date +%T)] job $SLURM_JOB_ID on $(hostname); GPU: ${CUDA_VISIBLE_DEVICES:-unset}; port $PORT"
 echo "[$(date +%T)] label=$LABEL model=${MODEL_PATH:-base} data=[$DATA_DIRS] max_tokens=$MAX_TOKENS extra_body=$EXTRA_BODY"
 
-SERVE_ARGS=(--vllm-env-dir "$VLLM_ENV" --served-model-name "$SERVED" --port "$PORT" --max-model-len "$MAX_MODEL_LEN" --gpu-memory-utilization 0.85)
+SERVE_ARGS=(--vllm-env-dir "$VLLM_ENV" --served-model-name "$SERVED" --port "$PORT" --max-model-len "$MAX_MODEL_LEN" --gpu-memory-utilization "$GPU_UTIL")
 if [[ -n "$MODEL_PATH" ]]; then
     # Why not --adapter-path: マージ済みなら通常モデルと同じ経路で配信でき、LoRA 対応の差に左右されない。
     SERVE_ARGS+=(--model-path "$MODEL_PATH" --model-revision "$MODEL_REVISION")
@@ -123,6 +131,25 @@ until curl -sf -H "Authorization: Bearer local" "http://127.0.0.1:$PORT/v1/model
     waited=$((waited + 15))
 done
 echo "[$(date +%T)] server ready on port $PORT after ${waited}s"
+FALLBACK_PORT=$((PORT + 50))
+if [[ -n "$FALLBACK_PATH" ]]; then
+    (
+        cd "$ROOT_DIR"
+        exec setsid uv run scripts/serve_vllm.py --vllm-env-dir "$VLLM_ENV" --model-path "$FALLBACK_PATH" --model-revision "" \
+            --served-model-name "$FALLBACK_SERVED" --port "$FALLBACK_PORT" --max-model-len "$MAX_MODEL_LEN" \
+            --gpu-memory-utilization "$FALLBACK_GPU_UTIL" --max-num-seqs 16 --disable-log-stats --disable-uvicorn-access-log \
+            --reasoning-parser "$FALLBACK_REASONING_PARSER"
+    ) > "$LOG_DIR/vllm_fallback_$FALLBACK_PORT.log" 2>&1 &
+    FALLBACK_PID=$!
+    trap 'stop_server; kill -TERM -- "-$FALLBACK_PID" 2>/dev/null || true' EXIT
+    waited=0
+    until curl -sf -H "Authorization: Bearer local" "http://127.0.0.1:$FALLBACK_PORT/v1/models" > /dev/null; do
+        if ! kill -0 "$FALLBACK_PID" 2>/dev/null; then echo "fallback server exited; see $LOG_DIR/vllm_fallback_$FALLBACK_PORT.log" >&2; exit 1; fi
+        if (( waited >= READY_TIMEOUT_SEC )); then echo "fallback server not ready" >&2; exit 1; fi
+        sleep 15; waited=$((waited + 15))
+    done
+    echo "[$(date +%T)] fallback server ready on port $FALLBACK_PORT after ${waited}s"
+fi
 
 cd "$HANDOVER_DIR"
 status=0
@@ -141,6 +168,10 @@ for data_dir in $DATA_DIRS; do
         [[ -n "$INSTRUCTION_FILE" ]] && repair_args+=(--generate-instruction-file "$INSTRUCTION_FILE")
         for excluded in $EXCLUDE_TEMPLATED_DIRS; do [[ "$excluded" == "$data_dir" ]] && repair_args+=(--exclude-templated); done
         thinking=on; [[ "$EXTRA_BODY" == *'"enable_thinking": false'* ]] && thinking=off
+        repair_args+=(--max-repairs "$MAX_REPAIRS")
+        if [[ -n "$FALLBACK_PATH" ]]; then
+            repair_args+=(--fallback-model "$FALLBACK_SERVED" --fallback-api-base "http://127.0.0.1:$FALLBACK_PORT/v1" --fallback-thinking "$FALLBACK_THINKING")
+        fi
         uv run python scripts/evaluate_student_program.py \
             --data-dir "$data_dir" --api-base "http://127.0.0.1:$PORT/v1" --model "$SERVED" \
             --label "$LABEL" --run-name "$RUN_NAME-$tag" --max-tokens "$MAX_TOKENS" --thinking "$thinking" \

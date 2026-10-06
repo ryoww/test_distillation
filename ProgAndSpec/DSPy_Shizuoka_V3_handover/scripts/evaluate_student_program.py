@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""生成→検証→修復の 2 段プログラム（src/student_program.StudentRepairSolver）を問題集で採点する。
+"""生成→検証→修復（→フォールバック）のエージェント経路（src/agent.OptimizationAgent）を問題集で採点する。
 
 evaluate_solver_model.py と同じ shard 形式で書くので、summarize_solver_runs.py でそのまま比べられる。
 修復段の指示文は GEPA の出力（outputs/<run>/gepa/instruction.md）を `--repair-instruction-file` で渡す。
@@ -26,10 +26,10 @@ if str(BASE_DIR) not in sys.path:
 import dspy
 
 from src import best_known as _best_known
+from src.agent import OptimizationAgent
 from src.data_loader import convert_to_dspy_example, load_v3_data
 from src.lm_config import LMConfig, create_lm
 from src.metrics_v3 import evaluate_algorithm_v3
-from src.student_program import StudentRepairSolver
 
 RESULT_FILENAME = "evaluation_results_v3_gepa_phaseE.json"
 
@@ -45,6 +45,10 @@ def parse_args() -> argparse.Namespace:
         "--output-dir", type=Path, default=BASE_DIR / "outputs" / "prompt_model_comparisons"
     )
     parser.add_argument("--generate-instruction-file", type=Path)
+    parser.add_argument("--max-repairs", type=int, default=1, help="修復の回数（GEPA の検証と揃えるなら 1）")
+    parser.add_argument("--fallback-model", help="student が通らないときに同じ手順で試す大きいモデル")
+    parser.add_argument("--fallback-api-base")
+    parser.add_argument("--fallback-thinking", choices=("on", "off"), default="off")
     parser.add_argument("--repair-instruction-file", type=Path)
     parser.add_argument("--max-tokens", type=int, default=8192)
     parser.add_argument("--thinking", choices=("on", "off"), default="on")
@@ -62,21 +66,22 @@ def _read(path: Path | None) -> str | None:
     return path.read_text(encoding="utf-8") if path else None
 
 
-def score_row(program: StudentRepairSolver, example: dict, exec_timeout: float) -> dict:
-    """1 問を 2 段で解いて採点する。参照値は採点にだけ使い、プログラムには渡さない。"""
+def score_row(agent: OptimizationAgent, example: dict, exec_timeout: float) -> dict:
+    """1 問をエージェント経路で解いて採点する。参照値は採点にだけ使い、エージェントには渡さない。"""
     started = time.monotonic()
     prompt = convert_to_dspy_example(example["record"], use_reference=False)["requirement"]
-    pred = program(
-        requirement=prompt, core_type=example["core_type"], problem_instance=example["instance"]
-    )
-    code = pred.algorithm_code
+    result = agent.solve(prompt, example["core_type"], example["instance"])
+    code = result.code
     base = {
         "instance_id": example["instance_id"],
         "name": example.get("name", ""),
         "core_type": example["core_type"],
         "code": code,
-        "first_verdict": pred.first_verdict,
-        "repaired": pred.repaired,
+        "agent_status": result.status,
+        "first_verdict": result.attempts[0].verdict if result.attempts else "",
+        "repaired": any(a.stage.endswith("-repair") for a in result.attempts),
+        "fallback_used": result.fallback_used,
+        "attempts": len(result.attempts),
     }
     if "def solve" not in code:
         return {**base, "status": "gen_error", "score": -0.5, "detail": "no solve() in response",
@@ -124,20 +129,32 @@ def main() -> int:
     if args.limit:
         examples = examples[: args.limit]
 
-    dspy.settings.configure(
-        lm=create_lm(
+    def lm_for(model, api_base, thinking):
+        return create_lm(
             LMConfig(
-                model=args.model,
-                api_base=args.api_base,
+                model=model,
+                api_base=api_base,
                 temperature=0.0,
                 max_tokens=args.max_tokens,
                 timeout=args.timeout,
-                enable_thinking=args.thinking == "on",
+                enable_thinking=thinking == "on",
             )
         )
-    )
-    program = StudentRepairSolver(
-        _read(args.generate_instruction_file), _read(args.repair_instruction_file), args.exec_timeout
+
+    student = lm_for(args.model, args.api_base, args.thinking)
+    dspy.settings.configure(lm=student)
+    fallback = None
+    if args.fallback_model:
+        fallback = lm_for(
+            args.fallback_model, args.fallback_api_base or args.api_base, args.fallback_thinking
+        )
+    program = OptimizationAgent(
+        student,
+        fallback_lm=fallback,
+        generate_instruction=_read(args.generate_instruction_file),
+        repair_instruction=_read(args.repair_instruction_file),
+        max_repairs=args.max_repairs,
+        exec_timeout=args.exec_timeout,
     )
 
     shard_dir = args.output_dir / args.run_name / f"{args.label}__shard01of01"
@@ -151,6 +168,7 @@ def main() -> int:
             print(
                 f"[{index}/{len(examples)}] {row['instance_id']}: {row['status']} "
                 f"score={row['score']:.2f} first={row['first_verdict']} repaired={row['repaired']} "
+                f"fallback={row['fallback_used']} "
                 f"({row['elapsed']:.0f}s)",
                 flush=True,
             )
@@ -166,7 +184,9 @@ def main() -> int:
             "model": args.model,
             "label": args.label,
             "data_dir": str(args.data_dir.resolve()),
-            "program": "StudentRepairSolver",
+            "program": "OptimizationAgent",
+            "max_repairs": args.max_repairs,
+            "fallback_model": args.fallback_model or "",
             "generate_instruction_file": str(args.generate_instruction_file or ""),
             "repair_instruction_file": str(args.repair_instruction_file or ""),
             "thinking": args.thinking,
@@ -176,7 +196,11 @@ def main() -> int:
         json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8"
     )
     repaired = sum(1 for r in rows if r["repaired"])
-    print(f"\n{args.label}: mean={payload['test']['mean_score']:.3f} repaired={repaired}/{len(rows)}")
+    fell_back = sum(1 for r in rows if r["fallback_used"])
+    print(
+        f"\n{args.label}: mean={payload['test']['mean_score']:.3f} "
+        f"repaired={repaired}/{len(rows)} fallback={fell_back}/{len(rows)}"
+    )
     print(f"results: {shard_dir / RESULT_FILENAME}")
     return 0
 
