@@ -1,4 +1,6 @@
-from scripts.summarize_solver_runs import gap_of, is_correct, summarize
+import json
+
+from scripts.summarize_solver_runs import gap_of, is_correct, kinds_of, summarize
 
 
 def _row(status, cost, ref, score=1.0):
@@ -27,3 +29,9 @@ def test_zero_reference_counts_only_zero_cost():
 def test_exact_reference_match_is_correct():
     assert is_correct(_row("exact_match", 100.0, 100.0), max_gap=0.10)
     assert not is_correct(_row("infeasible", 100.0, 100.0), max_gap=0.10)
+
+
+def test_kinds_of_maps_generated_ids_to_their_kind(tmp_path):
+    (tmp_path / "prob_4001.json").write_text(json.dumps({"id": 4001, "provenance": {"kind": "clsp"}}))
+    (tmp_path / "prob_0001.json").write_text(json.dumps({"id": 1}))
+    assert kinds_of([tmp_path]) == {"prob_4001": "clsp"}

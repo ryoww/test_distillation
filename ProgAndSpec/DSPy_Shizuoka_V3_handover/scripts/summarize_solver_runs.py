@@ -58,6 +58,18 @@ def summarize(rows: list[dict], max_gap: float) -> dict:
     }
 
 
+def kinds_of(problem_dirs: list[Path]) -> dict[str, str]:
+    """instance_id → provenance.kind（大規模生成問題）。種別ホールドアウトの集計に使う。"""
+    table = {}
+    for directory in problem_dirs:
+        for path in directory.glob("prob_*.json"):
+            record = json.loads(path.read_text(encoding="utf-8"))
+            kind = (record.get("provenance") or {}).get("kind")
+            if kind:
+                table[f"prob_{record['id']}"] = kind
+    return table
+
+
 def load(spec: str) -> tuple[str, dict[str, dict]]:
     label, _, path = spec.partition("=")
     path = Path(path)
@@ -71,9 +83,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", action="append", required=True, help="label=shard_dir|json")
     parser.add_argument("--max-gap", type=float, default=0.10)
+    parser.add_argument(
+        "--only-kinds", default="", help="この種別の問題だけ数える（カンマ区切り。--problem-dir が要る）"
+    )
+    parser.add_argument(
+        "--problem-dir", type=Path, action="append", default=[], help="種別を引く問題ディレクトリ"
+    )
     args = parser.parse_args()
 
     runs = [load(spec) for spec in args.run]
+    if args.only_kinds:
+        wanted = set(args.only_kinds.split(","))
+        table = kinds_of(args.problem_dir)
+        runs = [
+            (label, {iid: r for iid, r in rows.items() if table.get(iid) in wanted})
+            for label, rows in runs
+        ]
     base_label, base_rows = runs[0]
     print("| 条件 | 問題数 | 正解 | 参照以上 | 可行 | 平均スコア | 平均出力 token | 両方正解 / 基準のみ / 比較側のみ |")
     print("|---|---:|---:|---:|---:|---:|---:|---|")
