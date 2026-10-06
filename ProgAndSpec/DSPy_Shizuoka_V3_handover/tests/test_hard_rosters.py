@@ -42,7 +42,11 @@ def _check(record: dict, solution: object) -> dict:
     return check_feasibility_detailed(record["core_type"], record["instance"], solution)
 
 
-@pytest.mark.parametrize("pid", sorted(EXPECTED_KINDS))
+# prob_302 の同梱参照解は、問題文の「基地に戻る」を 200 ペアリング中 116 で破っている（既知欠陥）。
+SHIPPED_REFERENCE_DEFECTS = {"prob_302"}
+
+
+@pytest.mark.parametrize("pid", sorted(set(EXPECTED_KINDS) - SHIPPED_REFERENCE_DEFECTS))
 def test_reference_solution_is_feasible_and_objective_is_reproduced(pid):
     record = _load(pid)
     kind = find_kind(record["instance"])
@@ -54,7 +58,28 @@ def test_reference_solution_is_feasible_and_objective_is_reproduced(pid):
     assert abs(result["cost"] - objective) <= 1e-3 * max(1.0, abs(objective))
 
 
-@pytest.mark.parametrize("pid", sorted(EXPECTED_KINDS))
+def test_shipped_302_reference_breaks_base_return_but_covers_each_flight_once():
+    record = _load("prob_302")
+    result = _check(record, _reference(record))
+    assert result["verified"] and not result["feasible"]
+    assert sum("ends at non-base" in v for v in result["violations"]) == 116
+    assert not any("covered" in v for v in result["violations"])
+
+
+def test_302_rules_apply_only_to_full_width_core_type():
+    record = _load("prob_312")
+    solution = _reference(record)
+    solution["pairings"].append(copy.deepcopy(solution["pairings"][0]))
+    lenient = _check(record, solution)
+    assert not any("covered" in v or "ends at non-base" in v for v in lenient["violations"])
+    strict = check_feasibility_detailed(
+        _load("prob_302")["core_type"], record["instance"], solution
+    )
+    assert any("covered 2 times" in v for v in strict["violations"])
+    assert any("ends at non-base" in v for v in strict["violations"])
+
+
+@pytest.mark.parametrize("pid", sorted(set(EXPECTED_KINDS) - SHIPPED_REFERENCE_DEFECTS))
 def test_scorer_returns_negative_recomputed_cost(pid):
     record = _load(pid)
     reference = _reference(record)

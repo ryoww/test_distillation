@@ -11,6 +11,7 @@ NOTE: V2のsolution形式多样（list[list], list[dict], dict, float, str）の
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, Callable
 
 from .feasibility_shapes import (
@@ -116,7 +117,11 @@ def check_feasibility_detailed(core_type: str, instance: dict, solution: Any) ->
         }
 
     try:
-        result = fn(instance, solution)
+        # 同じ instance 形で規則だけ違う種別（乗務員ペアリングの 302 系 / 312 系）は core_type で切り替える。
+        if hard_kind and "core_type" in inspect.signature(fn).parameters:
+            result = fn(instance, solution, core_type=core_type)
+        else:
+            result = fn(instance, solution)
         # Ensure required keys
         if "feasible" not in result:
             result["feasible"] = True

@@ -160,13 +160,18 @@ def _pairing_cost(instance: dict, legs: list[dict]) -> float:
 
 
 def _check_pairings(
-    instance: dict, flights: dict[int, dict], pairings: list[list[int]], container: dict
+    instance: dict,
+    flights: dict[int, dict],
+    pairings: list[list[int]],
+    container: dict,
+    *,
+    strict: bool = False,
 ) -> tuple[list[str], float, int]:
     """ペアリング制約を検査し、(違反, stage1 費用, 検査した制約数) を返す。
 
-    Why not 基地帰着を要求しない: prob_312 / prob_330 の要件は「基地発」のみで、同梱参照解も
-    3 問すべてで基地に戻らないペアリングを含む（prob_302 の description は帰着を求めるが、
-    instance の形だけでは prob_312 と区別できない）。
+    strict は prob_302 系の規則（各便はちょうど 1 つのペアリングか外注、ペアリングは基地に戻る）。
+    prob_312 / prob_330 は「基地発」「各便 1 つ以上」だけなので既定は非 strict。instance の形は
+    両者で同じなので、呼び出し側が core_type で切り替える。
     """
     bases = set(instance["bases"])
     lo, hi = instance["min_connect_hours"], instance["max_connect_hours"]
@@ -182,6 +187,8 @@ def _check_pairings(
         covered.update(ids)
         if legs[0]["origin"] not in bases:
             violations.append(f"pairing {idx} departs from non-base {legs[0]['origin']}")
+        if strict and legs[-1]["destination"] not in bases:
+            violations.append(f"pairing {idx} ends at non-base {legs[-1]['destination']}")
         bad_links = 0
         for a, b in pairwise(legs):
             gap = b["dep_time"] - a["arr_time"]
@@ -195,6 +202,10 @@ def _check_pairings(
         if span > max_span + _EPS:
             violations.append(f"pairing {idx} spans {span:.2f}h > {max_span}")
         cost += _pairing_cost(instance, legs)
+    if strict:
+        for fid, times in sorted(covered.items()):
+            if times > 1:
+                violations.append(f"flight {fid} covered {times} times (each flight exactly once)")
     uncovered = set(flights) - set(covered)
     declared = _first(container, _UNCOVERED_KEYS)
     if isinstance(declared, list):
@@ -205,14 +216,17 @@ def _check_pairings(
                 f"{len(uncovered)} are actually uncovered"
             )
     cost += len(uncovered) * instance["uncovered_flight_cost"]
-    return violations, cost, 4 * len(pairings) + 1
+    return violations, cost, (6 if strict else 4) * len(pairings) + 1
 
 
 def _detect_crew_pairing(instance: dict) -> bool:
     return "flights" in instance and "bases" in instance and "crews" not in instance
 
 
-def _check_crew_pairing(instance: dict, solution: Any) -> dict:
+def _check_crew_pairing(instance: dict, solution: Any, core_type: str = "") -> dict:
+    # prob_302 系は math_type が全角括弧「集合分割（列生成）」、prob_312 系は半角括弧。
+    # 規則が違う（302: ちょうど 1 回・基地帰着）のに instance の形は同じなので、ここだけで見分ける。
+    strict = "（" in core_type
     flights = _flight_table(instance)
     if flights is None:
         return _unverified("crew pairing instance without flights")
@@ -220,7 +234,7 @@ def _check_crew_pairing(instance: dict, solution: Any) -> dict:
     if pairings is None:
         return _unverified("crew pairing without readable 'pairings'")
     violations, cost, total = _check_pairings(
-        instance, flights, [ids for _, ids in pairings], solution
+        instance, flights, [ids for _, ids in pairings], solution, strict=strict
     )
     violations += _declared_mismatch(solution, cost, "objective_value", "total_cost", "cost")
     return _result(violations, total + 1, cost=cost)
