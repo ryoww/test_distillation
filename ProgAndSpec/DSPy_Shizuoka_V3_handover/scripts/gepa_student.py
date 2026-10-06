@@ -32,7 +32,12 @@ from src.best_known import init_registry
 from src.data_loader import load_split_dirs, prepare_examples
 from src.gepa_feedback_v3 import gepa_feedback_v3, set_exec_timeout, set_use_reference
 from src.lm_config import LMConfig, create_lm
-from src.student_program import StudentSolver, default_instruction
+from src.student_program import (
+    StudentRepairSolver,
+    StudentSolver,
+    default_instruction,
+    examples_with_instance,
+)
 from train_gepa_v3 import TemplateInstructionProposer
 
 
@@ -69,6 +74,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-threads", type=int, default=8)
     parser.add_argument("--exec-timeout", type=float, default=600.0)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--repair",
+        action="store_true",
+        help="生成→検証→修復の 2 段にし、GEPA には修復段の指示文だけを進化させる（生成段の指示文は固定）",
+    )
+    parser.add_argument("--repair-seed-file", type=Path, help="修復段の初期指示文（省略時は既定）")
     return parser.parse_args()
 
 
@@ -98,6 +109,8 @@ def main() -> None:
     ]
     trainset = prepare_examples(train)
     valset = prepare_examples(splits["validation"])
+    if args.repair:
+        trainset, valset = examples_with_instance(trainset), examples_with_instance(valset)
 
     # Why temperature 0: GEPA は同じ minibatch で親と子を比べて採否を決める。温度を上げると
     # 指示文の差より標本の揺れで採否が決まる。enable_thinking は学習時の描画に合わせる。
@@ -121,7 +134,13 @@ def main() -> None:
         if args.seed_instruction_file
         else default_instruction()
     )
-    program = StudentSolver(seed)
+    if args.repair:
+        repair_seed = (
+            args.repair_seed_file.read_text(encoding="utf-8") if args.repair_seed_file else None
+        )
+        program = StudentRepairSolver(seed, repair_seed, exec_timeout=args.exec_timeout)
+    else:
+        program = StudentSolver(seed)
     optimizer = dspy.GEPA(
         metric=gepa_feedback_v3,
         reflection_lm=reflection,
@@ -136,7 +155,8 @@ def main() -> None:
     )
     compiled = optimizer.compile(program, trainset=trainset, valset=valset)
 
-    instruction = compiled.generate.signature.instructions
+    evolved = compiled.repair if args.repair else compiled.generate
+    instruction = evolved.signature.instructions
     (args.run_dir / "instruction.md").write_text(instruction, encoding="utf-8")
     results = getattr(compiled, "detailed_results", None)
     summary = {
@@ -148,6 +168,7 @@ def main() -> None:
         "max_full_evals": args.max_full_evals,
         "seed_is_default": args.seed_instruction_file is None,
         "instruction_chars": len(instruction),
+        "evolved_component": "repair" if args.repair else "generate",
         "val_aggregate_scores": list(getattr(results, "val_aggregate_scores", []) or []),
         "best_idx": getattr(results, "best_idx", None),
     }
