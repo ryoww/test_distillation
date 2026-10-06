@@ -79,6 +79,17 @@ def load(spec: str) -> tuple[str, dict[str, dict]]:
     return label, {r["instance_id"]: r for r in rows}
 
 
+def print_threshold_table(runs: list[tuple[str, dict[str, dict]]], gaps: list[float]) -> None:
+    """閾値ごとの正解数を 1 表に並べる。閾値で条件の順位が入れ替わらないかを見るため。"""
+    header = " | ".join(f"≤ {g * 100:+.0f}%" for g in gaps)
+    print(f"| 条件 | 問題数 | {header} | 参照以上 |")
+    print("|---|---:|" + "---:|" * len(gaps) + "---:|")
+    for label, rows in runs:
+        counts = " | ".join(str(sum(is_correct(r, g) for r in rows.values())) for g in gaps)
+        at_least = sum(r["status"] in AT_LEAST_REFERENCE for r in rows.values())
+        print(f"| {label} | {len(rows)} | {counts} | {at_least} |")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", action="append", required=True, help="label=shard_dir|json")
@@ -88,6 +99,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--problem-dir", type=Path, action="append", default=[], help="種別を引く問題ディレクトリ"
+    )
+    parser.add_argument(
+        "--gaps",
+        default="",
+        help="正解の閾値を並べて数える（例: 0,0.05,0.10）。三層評価表の +0 / +5 / +10% 併記用",
     )
     args = parser.parse_args()
 
@@ -99,6 +115,9 @@ def main() -> None:
             (label, {iid: r for iid, r in rows.items() if table.get(iid) in wanted})
             for label, rows in runs
         ]
+    if args.gaps:
+        print_threshold_table(runs, [float(g) for g in args.gaps.split(",")])
+        return
     base_label, base_rows = runs[0]
     print("| 条件 | 問題数 | 正解 | 参照以上 | 可行 | 平均スコア | 平均出力 token | 両方正解 / 基準のみ / 比較側のみ |")
     print("|---|---:|---:|---:|---:|---:|---:|---|")
