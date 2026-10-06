@@ -715,6 +715,13 @@ STUDENT_PATH=/var/tmp/yy-lab-ft/gemma4-12b-merged-lora-20261004-merged RUN_DIR=o
   各段を Slurm のジョブにして依存関係でつなぎ、段ごとに同じテスト集合で測る。
 - 評価は段ごとに「student × 指示文」の組で、雛形テスト・大規模生成テスト・大規模元問題・雛形外 11 問
   （`data/problems` に `EXCLUDE_TEMPLATED_DIRS`）を同じ条件で測る。
+- **修復段だけを進化させる（`--repair`）。** SFT 済み student は生成の指示文を書き換えると崩れる
+  （`RESCORE_REPORT.md` 29・31 章: 3 回とも採用 0）。`gepa_student.py --repair` は「生成（指示文固定、LM を直接
+  呼ぶ）→ 検証器 → 違反があれば修復」の 2 段プログラム（`src/student_program.StudentRepairSolver`）にし、GEPA
+  には修復段の指示文だけを進化させる。検証器は参照値を使わない（`src/verify_loop.verify_solution`）。
+  評価は `slurm_eval_solver.sbatch` に `REPAIR_INSTRUCTION_FILE=<gepa の instruction.md | default>` を渡すと
+  `scripts/evaluate_student_program.py` が同じ shard 形式で書く（`default` は既定の修復指示文で、修復ループ
+  だけの効果）。
 
 ## 13. 種別ホールドアウトと、学習データが 0 件だった種別の修正（2026-10-06）
 
