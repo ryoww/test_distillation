@@ -80,6 +80,17 @@ def analyze_instance_structure(instance: dict) -> str:
                 lines.append(f"- {key}: list[{len(val)}] of dicts with keys [{sub_keys}]")
                 lines.append(f"  Sample element: {sample_val}")
                 lines.append(f"  Access: for item in {key}: item['{list(val[0].keys())[0]}']")
+            elif val and isinstance(val[0], list):
+                # Why not val[:3]: 行列（シナリオ収益率 300×1200 など）は 3 行だけで数万文字になり、
+                # 問題文が学習の最大長を超える。形と先頭要素だけ書き、本体は実行時の instance に任せる。
+                width = len(val[0])
+                elem_type = type(val[0][0]).__name__ if width else "?"
+                lines.append(
+                    f"- {key}: list[{len(val)}] of lists[{width}] of {elem_type}s "
+                    f"(matrix {len(val)}x{width}; the full data is only in `instance` at runtime)"
+                )
+                lines.append(f"  Sample: {key}[0][:5] = {val[0][:5]}")
+                lines.append(f"  Access: {key}[i][j] gives a {elem_type}")
             elif val:
                 elem_type = type(val[0]).__name__
                 lines.append(f"- {key}: list[{len(val)}] of {elem_type}s")
