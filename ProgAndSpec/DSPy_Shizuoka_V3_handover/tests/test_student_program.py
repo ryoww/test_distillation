@@ -73,7 +73,7 @@ def test_repair_runs_only_when_the_verifier_rejects(monkeypatch):
     monkeypatch.setattr(vl, "verify_solution", lambda *a, **k: next(verdicts))
     lm = _ScriptedLM(["```python\ndef solve(instance):\n    return {}\n```", "def solve(instance):\n    return {'ok': 1}"])
     with dspy.context(lm=lm):
-        pred = sp.StudentRepairSolver("GEN", "FIX").forward(requirement="REQ", core_type="x", instance={})
+        pred = sp.StudentRepairSolver("GEN", "FIX")(requirement="REQ", core_type="x", problem_instance={})
     assert pred.repaired and "'ok': 1" in pred.algorithm_code
     assert lm.seen[0][0] == {"role": "system", "content": "GEN"}
     assert lm.seen[1][0] == {"role": "system", "content": "FIX"}
@@ -86,5 +86,14 @@ def test_no_repair_when_the_verifier_accepts(monkeypatch):
     monkeypatch.setattr(vl, "verify_solution", lambda *a, **k: Verdict(ok=True, kind="feasible"))
     lm = _ScriptedLM(["def solve(instance):\n    return {'a': 1}"])
     with dspy.context(lm=lm):
-        pred = sp.StudentRepairSolver("GEN", "FIX").forward(requirement="REQ", core_type="x", instance={})
+        pred = sp.StudentRepairSolver("GEN", "FIX")(requirement="REQ", core_type="x", problem_instance={})
     assert not pred.repaired and len(lm.seen) == 1
+
+
+def test_examples_with_instance_keep_the_metric_field_and_add_an_input():
+    example = dspy.Example(requirement="R", core_type="x", instance={"n": 1}, instance_id="p").with_inputs(
+        "requirement", "core_type"
+    )
+    out = sp.examples_with_instance([example])[0]
+    assert out.inputs().keys() == {"requirement", "core_type", "problem_instance"}
+    assert out.instance == {"n": 1} and out.problem_instance == {"n": 1}

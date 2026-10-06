@@ -111,11 +111,13 @@ class StudentRepairSolver(dspy.Module):
         text = output["text"] if isinstance(output, dict) else output
         return ensure_parse_helpers(strip_code_fence(text or ""))
 
-    def forward(self, requirement: str, core_type: str, instance: dict):
+    # Why not 引数名 instance: dspy のコールバック包みは第 1 引数を instance（モジュール自身）と呼ぶので、
+    # 同名のキーワード引数を渡すと衝突する。
+    def forward(self, requirement: str, core_type: str, problem_instance: dict):
         from src.verify_loop import verify_solution
 
         code = self.generate_code(requirement)
-        verdict = verify_solution(code, instance, core_type, timeout=self.exec_timeout)
+        verdict = verify_solution(code, problem_instance, core_type, timeout=self.exec_timeout)
         repaired = False
         if not verdict.ok:
             with dspy.context(adapter=PlainRepairAdapter()):
@@ -132,5 +134,10 @@ class StudentRepairSolver(dspy.Module):
 
 
 def examples_with_instance(examples: list) -> list:
-    """修復段は instance で検証するので、forward の入力に instance も渡す。"""
-    return [ex.with_inputs("requirement", "core_type", "instance") for ex in examples]
+    """修復段は instance で検証するので、forward の入力に problem_instance としても渡す（metric は instance を読む）。"""
+    return [
+        dspy.Example(**ex.toDict(), problem_instance=ex.instance).with_inputs(
+            "requirement", "core_type", "problem_instance"
+        )
+        for ex in examples
+    ]

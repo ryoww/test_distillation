@@ -66,7 +66,9 @@ def score_row(program: StudentRepairSolver, example: dict, exec_timeout: float) 
     """1 問を 2 段で解いて採点する。参照値は採点にだけ使い、プログラムには渡さない。"""
     started = time.monotonic()
     prompt = convert_to_dspy_example(example["record"], use_reference=False)["requirement"]
-    pred = program(requirement=prompt, core_type=example["core_type"], instance=example["instance"])
+    pred = program(
+        requirement=prompt, core_type=example["core_type"], problem_instance=example["instance"]
+    )
     code = pred.algorithm_code
     base = {
         "instance_id": example["instance_id"],

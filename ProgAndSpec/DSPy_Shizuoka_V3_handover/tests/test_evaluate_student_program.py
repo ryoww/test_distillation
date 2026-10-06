@@ -4,7 +4,7 @@ from scripts.evaluate_student_program import score_row
 
 
 class _Program:
-    def __call__(self, requirement, core_type, instance):
+    def __call__(self, requirement, core_type, problem_instance):
         return dspy.Prediction(algorithm_code="def f():\n    pass", first_verdict="exec_error", repaired=True)
 
 
