@@ -715,3 +715,32 @@ STUDENT_PATH=/var/tmp/yy-lab-ft/gemma4-12b-merged-lora-20261004-merged RUN_DIR=o
   各段を Slurm のジョブにして依存関係でつなぎ、段ごとに同じテスト集合で測る。
 - 評価は段ごとに「student × 指示文」の組で、雛形テスト・大規模生成テスト・大規模元問題・雛形外 11 問
   （`data/problems` に `EXCLUDE_TEMPLATED_DIRS`）を同じ条件で測る。
+
+## 13. 種別ホールドアウトと、学習データが 0 件だった種別の修正（2026-10-06）
+
+### 13.1 種別ホールドアウト（学習で見ない種別での汎化の測定）
+
+`merge_sft_datasets.py --exclude-kinds a,b,c` で大規模問題の種別を丸ごと学習から外す（雛形の行は kind を持たず
+常に残る）。同じ族（fjsp と fjsp_setup など）が片方だけ学習に残ると近い種別からの転移を測ることになるので、
+族ごとに外す。17 種別（教師データのある種別）を 4 fold に分けた。
+
+| fold | 外す種別 |
+|---|---|
+| f1 | facility_2ech, facility_multi, facility_robust, clsp |
+| f2 | fjsp, fjsp_setup, cutting_1d, cutting_2d |
+| f3 | mcnd, mcnd_surv, nurse_roster, role_roster, crew_pairing_seniority |
+| f4 | pdptw, vrptw_md, prp, prp_tw |
+
+各 fold で 4B を LoRA 学習し（`slurm_train_solver.sbatch`）、焼き込んで大規模テスト 120・元問題 28・雛形外 11 を
+解かせる。fold の結果は「外した種別」の問題だけを集計し、素の 4B と比べる。
+
+### 13.2 学習データが 0 件だった種別
+
+- **乗務員ペアリング（prob_302 系）**: 検証器が 302 系（各便ちょうど 1 回、基地に戻る）と 312 系（1 回以上、基地発）を
+  math_type の括弧（全角 / 半角）で見分けるようにした（`src/utils/hard/rosters.py`、`check_feasibility_detailed` が
+  core_type を渡す）。同梱 prob_302 の参照解は 200 ペアリング中 116 が基地に戻らず、既知欠陥にした
+  （`tests/test_hard_rosters.py`）。生成 instance の参照解は、Opus の解答 5 本を教師に加えて
+  `reference_hard_instances.py run --kinds crew_pairing` で付け直す。
+- **ポートフォリオ 2 種別**: 問題文の構造要約が行列（300×1200）の先頭 3 行をそのまま書き出し、3 万字を超えていた。
+  行列は形と先頭 5 要素だけ書くようにし（`src/modules.py`）、問題文は約 4.5 万字 → 8.6 千字になった。
+  本体は実行時の `instance` にあり、解答コードはそこから読む。
