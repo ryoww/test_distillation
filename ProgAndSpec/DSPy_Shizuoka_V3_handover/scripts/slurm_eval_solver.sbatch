@@ -38,6 +38,9 @@ EXCLUDE_TEMPLATED_DIRS="${EXCLUDE_TEMPLATED_DIRS:-}"
 SYSTEM_PREFIX_FILE="${SYSTEM_PREFIX_FILE:-}"
 # GEPA で進化させた指示文を system に使うとき（交互最適化の評価）。
 INSTRUCTION_FILE="${INSTRUCTION_FILE:-}"
+# 生成→検証→修復の 2 段プログラムで測るとき（scripts/evaluate_student_program.py）。修復段の指示文を指す。
+# "default" を渡すと既定の修復指示文で、修復ループだけの効果を測る。
+REPAIR_INSTRUCTION_FILE="${REPAIR_INSTRUCTION_FILE:-}"
 EVAL_TIMEOUT="${EVAL_TIMEOUT:-600}"
 EXEC_TIMEOUT="${EXEC_TIMEOUT:-60}"
 HANDOVER_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
@@ -132,6 +135,19 @@ for data_dir in $DATA_DIRS; do
     if [[ -n "$SYSTEM_PREFIX_FILE" ]]; then dir_args+=(--system-prefix-file "$SYSTEM_PREFIX_FILE"); fi
     if [[ -n "$INSTRUCTION_FILE" ]]; then dir_args+=(--instruction-file "$INSTRUCTION_FILE"); fi
     echo "[$(date +%T)] evaluating $tag ${dir_args[*]:-}"
+    if [[ -n "$REPAIR_INSTRUCTION_FILE" ]]; then
+        repair_args=()
+        [[ "$REPAIR_INSTRUCTION_FILE" != "default" ]] && repair_args+=(--repair-instruction-file "$REPAIR_INSTRUCTION_FILE")
+        [[ -n "$INSTRUCTION_FILE" ]] && repair_args+=(--generate-instruction-file "$INSTRUCTION_FILE")
+        for excluded in $EXCLUDE_TEMPLATED_DIRS; do [[ "$excluded" == "$data_dir" ]] && repair_args+=(--exclude-templated); done
+        thinking=on; [[ "$EXTRA_BODY" == *'"enable_thinking": false'* ]] && thinking=off
+        uv run python scripts/evaluate_student_program.py \
+            --data-dir "$data_dir" --api-base "http://127.0.0.1:$PORT/v1" --model "$SERVED" \
+            --label "$LABEL" --run-name "$RUN_NAME-$tag" --max-tokens "$MAX_TOKENS" --thinking "$thinking" \
+            --concurrency "$CONCURRENCY" --timeout "$EVAL_TIMEOUT" --exec-timeout "$EXEC_TIMEOUT" \
+            "${repair_args[@]}" 2>&1 | tee "$LOG_DIR/eval-$tag.log" || status=$?
+        continue
+    fi
     uv run python scripts/evaluate_solver_model.py \
         --data-dir "$data_dir" \
         --api-base "http://127.0.0.1:$PORT/v1" \
