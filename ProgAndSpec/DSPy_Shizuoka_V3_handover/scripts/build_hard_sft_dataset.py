@@ -181,7 +181,9 @@ def main() -> None:
         # 本文が同じコードは 1 本だけ再生し、すでに自分の問題で正解した instance には走らせない。
         solved_by_code: dict[tuple[str, str], set[str]] = defaultdict(set)
         representative: dict[tuple[str, str], str] = {}
-        for iid, key, _, _ in pairs:
+        # Why sorted: own の判定は完了順に集まるので、代表（written_for）が実行ごとに変わらないよう
+        # キー順で最初に正解した解答を代表にする。
+        for iid, key, _, _ in sorted(pairs, key=lambda item: (item[1], item[0])):
             answer = code_by_key[key]
             code_id = (answer["source"], answer["code"].strip())
             solved_by_code[code_id].add(iid)
