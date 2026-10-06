@@ -744,3 +744,7 @@ STUDENT_PATH=/var/tmp/yy-lab-ft/gemma4-12b-merged-lora-20261004-merged RUN_DIR=o
 - **ポートフォリオ 2 種別**: 問題文の構造要約が行列（300×1200）の先頭 3 行をそのまま書き出し、3 万字を超えていた。
   行列は形と先頭 5 要素だけ書くようにし（`src/modules.py`）、問題文は約 4.5 万字 → 8.6 千字になった。
   本体は実行時の `instance` にあり、解答コードはそこから読む。
+
+- **判定は CPU の空いているときに流す。** 大規模問題の解答は時間制限付きソルバーを使うので、GEPA や評価ジョブと同時に
+  `build_hard_sft_dataset.py` や `reference_hard_instances.py run` を走らせると解が悪くなり、正解の判定が変わる
+  （`RESCORE_REPORT.md` 32.4 節）。`sbatch -c 48` で他の CPU ジョブと重ならないようにするか、GPU ジョブの合間に流す。
