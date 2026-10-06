@@ -15,7 +15,8 @@
 #   STUDENT_PATH=/var/tmp/yy-lab-ft/<merged> RUN_DIR=outputs/bt-r1/gepa sbatch --export=ALL scripts/slurm_gepa_student.sbatch
 #
 # 上書きできる環境変数: GEPA_ARGS（gepa_student.py に足す引数）、RESUME=1（同じ RUN_DIR で続きから）、
-# SHARE_GPU=1（student と反省 LM を同じ GPU に載せる。`sbatch --gres=gpu:1` と組み合わせる）
+# SHARE_GPU=1（student と反省 LM を同じ GPU に載せる。`sbatch --gres=gpu:1` と組み合わせる）、
+# STUDENT_HF_HOME（STUDENT_PATH に Hugging Face の repo id を渡すときのキャッシュ）
 set -euo pipefail
 
 : "${STUDENT_PATH:?set STUDENT_PATH to the merged student model directory}"
@@ -54,6 +55,7 @@ if [[ -f "$CURAND_INC/curand_kernel.h" ]]; then export NVCC_APPEND_FLAGS="${NVCC
 
 (
     cd "$ROOT_DIR"
+    if [[ -n "${STUDENT_HF_HOME:-}" ]]; then export HF_HOME="$STUDENT_HF_HOME"; fi
     CUDA_VISIBLE_DEVICES=$STU_GPU exec setsid uv run scripts/serve_vllm.py --vllm-env-dir "$STUDENT_VLLM_ENV" \
         --model-path "$STUDENT_PATH" --served-model-name student --port "$STU_PORT" \
         --max-model-len 53248 --gpu-memory-utilization "$STU_UTIL" --max-num-seqs 16 \

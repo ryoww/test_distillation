@@ -42,6 +42,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--student-model", required=True, help="vLLM の served model name")
     parser.add_argument("--student-api-base", default="http://127.0.0.1:7501/v1")
     parser.add_argument("--student-max-tokens", type=int, default=8192)
+    parser.add_argument(
+        "--student-thinking",
+        choices=("on", "off"),
+        default="on",
+        help="chat template の enable_thinking。SFT 済みは学習時の描画に合わせて on、素のモデルは評価と同じ off",
+    )
     parser.add_argument("--reflection-model", default="Qwen/Qwen3.8-27B")
     parser.add_argument("--reflection-api-base", default="http://127.0.0.1:7502/v1")
     parser.add_argument("--data-dir", default=str(BASE_DIR / "data" / "problems_hard_gen"))
@@ -102,7 +108,7 @@ def main() -> None:
             temperature=0.0,
             max_tokens=args.student_max_tokens,
             timeout=1800,
-            enable_thinking=True,
+            enable_thinking=args.student_thinking == "on",
         )
     )
     reflection = create_lm(
@@ -135,6 +141,7 @@ def main() -> None:
     results = getattr(compiled, "detailed_results", None)
     summary = {
         "student_model": args.student_model,
+        "student_thinking": args.student_thinking,
         "reflection_model": args.reflection_model,
         "train": len(trainset),
         "validation": len(valset),
