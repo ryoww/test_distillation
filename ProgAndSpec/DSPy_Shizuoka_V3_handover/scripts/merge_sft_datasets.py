@@ -36,7 +36,10 @@ def with_system(messages: list[dict], system: str | None) -> list[dict]:
 
 
 def merge(
-    inputs: list[tuple[str, Path, int]], seed: int, system: str | None = None
+    inputs: list[tuple[str, Path, int]],
+    seed: int,
+    system: str | None = None,
+    exclude_kinds: frozenset[str] = frozenset(),
 ) -> dict[str, list[dict]]:
     merged: dict[str, list[dict]] = {split: [] for split in SPLITS}
     for label, directory, repeat in inputs:
@@ -46,6 +49,8 @@ def merge(
                 for line in (directory / f"{split}.jsonl").read_text(encoding="utf-8").splitlines()
                 if line.strip()
             ]
+            # 種別ホールドアウト: `kind` を持つ行（大規模問題）だけが対象。雛形の行は kind を持たず常に残る。
+            rows = [r for r in rows if r.get("kind") not in exclude_kinds]
             times = repeat if split == "train" else 1
             for row in rows * times:
                 merged[split].append(
@@ -69,15 +74,20 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--system-file", type=Path, help="全行の system をこの指示文に差し替える")
+    parser.add_argument(
+        "--exclude-kinds", default="", help="学習から外す大規模問題の種別（カンマ区切り、汎化の測定用）"
+    )
     args = parser.parse_args()
+    exclude = frozenset(k for k in args.exclude_kinds.split(",") if k)
 
     inputs = [parse_input(spec) for spec in args.input]
     system = args.system_file.read_text(encoding="utf-8") if args.system_file else None
-    merged = merge(inputs, args.seed, system)
+    merged = merge(inputs, args.seed, system, exclude)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     stats: dict = {
         "inputs": [f"{l}={p}*{n}" for l, p, n in inputs],
         "system_file": str(args.system_file) if args.system_file else None,
+        "exclude_kinds": sorted(exclude),
         "splits": {},
     }
     for split, rows in merged.items():

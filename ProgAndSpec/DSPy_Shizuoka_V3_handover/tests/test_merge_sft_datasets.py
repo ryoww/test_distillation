@@ -45,3 +45,18 @@ def test_merge_replaces_system_message_when_given(tmp_path):
     merged = merge([("a", tmp_path / "a", 1)], seed=0, system="NEW")
 
     assert [m["content"] for m in merged["train"][0]["messages"]] == ["NEW", "Q", "A"]
+
+
+def test_merge_drops_excluded_kinds_but_keeps_rows_without_kind(tmp_path):
+    _write(tmp_path / "a", "train", [_row("tpl", template_id=1)])
+    _write(tmp_path / "a", "validation", [])
+    _write(tmp_path / "b", "train", [_row("keep", kind="clsp"), _row("drop", kind="fjsp")])
+    _write(tmp_path / "b", "validation", [_row("vdrop", kind="fjsp")])
+
+    merged = merge(
+        [("a", tmp_path / "a", 1), ("b", tmp_path / "b", 1)], seed=0, exclude_kinds=frozenset({"fjsp"})
+    )
+
+    texts = sorted(r["messages"][0]["content"] for r in merged["train"])
+    assert texts == ["keep", "tpl"]
+    assert merged["validation"] == []
