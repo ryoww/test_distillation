@@ -755,3 +755,27 @@ STUDENT_PATH=/var/tmp/yy-lab-ft/gemma4-12b-merged-lora-20261004-merged RUN_DIR=o
 - **判定は CPU の空いているときに流す。** 大規模問題の解答は時間制限付きソルバーを使うので、GEPA や評価ジョブと同時に
   `build_hard_sft_dataset.py` や `reference_hard_instances.py run` を走らせると解が悪くなり、正解の判定が変わる
   （`RESCORE_REPORT.md` 32.4 節）。`sbatch -c 48` で他の CPU ジョブと重ならないようにするか、GPU ジョブの合間に流す。
+
+## 14. エージェントの実行経路（生成 → 隔離実行 → 検証 → 修復 → フォールバック）
+
+3 月の成果物「要件を入れると最適化プログラムを返す小型エージェント」の中核で、`report/20261007/next_steps_review.md`
+の C（4 者一致）に当たる。`src/agent.py` の `OptimizationAgent` が 1 問を次の順で処理し、コードと判定を返す。
+
+1. student（4B / 12B の SFT 済み、vLLM 配信）に問題文を渡してコードを生成
+2. サンドボックスで実行し、検証器で制約を確かめる（参照値は使わない。`src/verify_loop.verify_solution`）
+3. 違反や実行時エラーなら、指摘を見せて修復（最大 `--max-repairs`、既定 2）
+4. それでも通らなければ、フォールバック LM（大きいモデル。省略可）で同じ手順をもう 1 周
+5. 結果: `status`（solved / unverified / failed）、`code`、`objective`（検証器が再計算した目的値）、`violations`、
+   試行ごとの判定と秒数、`fallback_used`、`failure_reason`
+
+```bash
+uv run python scripts/solve_requirement.py data/problems_hard_gen/test/prob_4035.json \
+  --student-model student --student-api-base http://127.0.0.1:7601/v1 \
+  --fallback-model gemma4-12b --fallback-api-base http://127.0.0.1:7602/v1 --out result.json
+```
+
+- 入力はこの repo の問題レコード（JSON）。問題文は参照値を含めずに組み立てる。検証器が種別を知らない問題は
+  `unverified`（実行はできたが制約を機械的に確かめられない）として返し、solved とは区別する。
+- 修復段の指示文は `--repair-instruction-file` で差し替えられる（GEPA が進化させた `outputs/<run>/gepa/instruction.md`）。
+- 問題集での採点は `scripts/evaluate_student_program.py`（修復 1 回の `StudentRepairSolver`）か、同じ経路を
+  `slurm_eval_solver.sbatch` の `REPAIR_INSTRUCTION_FILE` で流す。
