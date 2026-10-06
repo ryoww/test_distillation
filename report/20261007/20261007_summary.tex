@@ -1,0 +1,71 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage{luatexja}
+\usepackage[haranoaji]{luatexja-preset}
+\usepackage{geometry}
+\geometry{top=14mm,bottom=14mm,left=18mm,right=18mm}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\setlist{nosep,leftmargin=*}
+\usepackage{titlesec}
+\titlespacing*{\section}{0pt}{6pt}{3pt}
+\titleformat{\section}{\normalfont\bfseries\large}{}{0pt}{}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue,citecolor=black}
+\renewcommand{\tablename}{表}
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{3pt}
+
+\begin{document}
+
+{\LARGE\bfseries 進捗の要約（2026-10-07）}\hfill 下沢\,亮太郎
+
+\medskip
+\textbf{目標}: 要件を入れると最適化プログラムを書く，最適化専用の小型AIエージェント（2027年3月発表）．
+柱はプロンプト最適化（GEPA）と，プロンプト最適化とfine-tuningを交互に回す方法（BetterTogether）．
+
+\section{今回やったこと}
+\begin{itemize}
+  \item \textbf{難しい問題集を作った．} これまでの問題は厳密解が出る小規模なもので，AIがほぼ満点に達していた．新たに受け取った28問を元に，厳密解が出ない規模の「大規模問題」を20種別$\times$40問，計800問生成し，学習用600問とテスト用120問に分けた．
+  \item \textbf{正解を確かめた教師データで小型モデルを学習した．} 大きなAI（Claude，Qwen）が書いたプログラムのうち，実際に動かして正解と確かめたものだけを16,228件集め，Gemma 4 12Bと4Bを学習した．
+  \item \textbf{プロンプト最適化と学習を交互に回した．} 学習済みモデルから始める周と，素のモデルから始める周の2通り．
+\end{itemize}
+
+\section{結果}
+テストは学習に使っていない問題．正解 = 制約違反0で参照解から+10\%以内．
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{lrrl}
+    \toprule
+    モデル & 大規模テスト120問 & 大規模の元問題28問 & 学習で見ていない種別 \\
+    \midrule
+    素のGemma 4 12B & 0 & 3 & 11問中3 \\
+    Qwen3.6 27B & 4 & --- & --- \\
+    Gemma 4 12B（学習後） & \textbf{93} & \textbf{14} & 11問中2 \\
+    4B（学習後，12Bの1/3の大きさ） & 81 & 10 & 11問中3 \\
+    4B（4種別を学習から外した場合） & 外した24問中\textbf{0} & 6 & 11問中3 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{わかったこと}
+\begin{enumerate}
+  \item \textbf{学習は効く．} 大規模問題を1問も解けなかったGemma 12Bが120問中93問を解き，4Bでも81問．12Bの9割強を1/3の大きさで出せる．
+  \item \textbf{ただし「学習で見た種類」に限る．} 種別を丸ごと学習から外すと，その種別は24問中0問．学習していない種別には転移しない．要件が学習種別の外から来ると解けない，というのが今の限界．
+  \item \textbf{プロンプト最適化は素のモデルにしか効かない．} 素のGemmaではGEPAが指示文を改善し，別の問題集で+19問（345$\rightarrow$364）．しかし学習済みモデルは学習時の指示文に張り付いていて，GEPAは52案を試して1案も採用できなかった．改善した指示文で学習し直しても，結果は変わらなかった．「プロンプト最適化と学習の相乗効果」は，この問題集ではまだ観測できていない．
+  \item \textbf{教師候補のGLM-5.3-Flashは不採用．} 手元のGPUでは1問40分かかり，3問で正解0．
+\end{enumerate}
+
+\section{次にやること}
+\begin{itemize}
+  \item 「生成$\rightarrow$実行$\rightarrow$検証$\rightarrow$修復」の流れをモデルに組み込み，単発の生成ではなくエージェントとして測る．プロンプト最適化は修復の段に限って使う．
+  \item 学習で見ていない種別への弱さを，種別ごとの交差検証（4分割）で正確に測り，3月の主張の範囲を決める．
+  \item 大きなAIを直接使う場合と比べた，1問あたりの時間と費用の表を作る．
+  \item \textbf{お願い}: 3月の評価用に，発表まで非公開の問題を5〜10問ご用意いただけないか．評価の手順は事前に合意したい．
+\end{itemize}
+
+\end{document}
