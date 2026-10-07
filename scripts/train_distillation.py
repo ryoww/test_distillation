@@ -63,12 +63,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", default=DEFAULT_DATASET)
     parser.add_argument("--dataset-revision", default=DATASET_REVISION)
     parser.add_argument("--dataset-config", default="sft_final")
+    parser.add_argument(
+        "--dataset-dir",
+        type=Path,
+        help="Local directory with train.jsonl and validation.jsonl (messages format); "
+        "overrides --dataset.",
+    )
     parser.add_argument("--run-name")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--resume-from-checkpoint", type=Path)
     parser.add_argument("--max-length", type=int, default=4096)
     parser.add_argument("--max-train-samples", type=int)
     parser.add_argument("--max-eval-samples", type=int, default=256)
+    parser.add_argument(
+        "--chat-template-kwargs",
+        default=None,
+        help='chat template に渡す追加引数の JSON（例: \'{"enable_thinking": true}\'）',
+    )
     parser.add_argument("--include-tools", action="store_true")
     parser.add_argument("--load-in-4bit", action="store_true")
     parser.add_argument(
@@ -76,10 +87,30 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Update all model parameters instead of adding LoRA adapters.",
     )
+    parser.add_argument(
+        "--fp32-weights",
+        action="store_true",
+        help="Keep fp32 master weights and compute in bf16 autocast (for full fine-tuning).",
+    )
+    parser.add_argument(
+        "--model-parallel",
+        action="store_true",
+        help="Split the layers over all visible GPUs (device_map=auto).",
+    )
+    parser.add_argument(
+        "--max-memory",
+        default=None,
+        help='--model-parallel で GPU ごとに置く重みの上限 JSON（例: \'{"0":"18GiB","1":"40GiB"}\'）',
+    )
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--lora-dropout", type=float, default=0.05)
     parser.add_argument("--learning-rate", type=float, default=2e-5)
+    parser.add_argument(
+        "--optim",
+        default="adamw_torch_fused",
+        help="transformers の optimizer 名。12B の全層学習は paged_adamw_8bit で GPU 1 枚に収める。",
+    )
     parser.add_argument("--warmup-steps", type=int, default=100)
     parser.add_argument("--num-train-epochs", type=float, default=1.0)
     parser.add_argument("--max-steps", type=int, default=-1)
@@ -122,13 +153,37 @@ def load_model(args: argparse.Namespace, quantization: BitsAndBytesConfig | None
         if getattr(config, "vision_config", None) is not None
         else AutoModelForCausalLM
     )
+    # Why not bf16 の重みのまま全層学習: 学習率 1e-5 の更新は bf16 の丸め幅より小さく大半が消え、
+    # Gemma 4 12B では検証損失が LoRA の 12 倍に留まった。fp32 の主重みに積み、計算だけ bf16 にする。
+    # Why not device_map=balanced: 共有した埋め込みと出力層が GPU 0 に載り、語彙 26 万の logits
+    # （16k token で 12 GB 超）も GPU 0 に出るため、重みを均等に割ると GPU 0 だけが溢れる。
+    device_map = "auto" if args.load_in_4bit or args.model_parallel else None
+    max_memory = None
+    if args.max_memory:
+        max_memory = {int(k): v for k, v in json.loads(args.max_memory).items()}
     return model_class.from_pretrained(
         args.model,
         revision=args.model_revision,
-        dtype=torch.bfloat16,
+        dtype=torch.float32 if args.fp32_weights else torch.bfloat16,
         quantization_config=quantization,
-        device_map="auto" if args.load_in_4bit else None,
+        device_map=device_map,
+        max_memory=max_memory,
     )
+
+
+def load_training_dataset(args: argparse.Namespace):
+    """Hub のデータセットか、ローカルの train/validation JSONL を読む。
+
+    ローカル JSONL は 1 行 1 例で、`messages`（role/content の配列）と任意の `tools` を持つ。
+    Hub 側と同じ列名なので、以降の前処理は共通になる。
+    """
+    if args.dataset_dir is None:
+        return load_dataset(args.dataset, args.dataset_config, revision=args.dataset_revision)
+    files = {split: str(args.dataset_dir / f"{split}.jsonl") for split in ("train", "validation")}
+    missing = [path for path in files.values() if not Path(path).is_file()]
+    if missing:
+        raise FileNotFoundError(f"dataset files not found: {missing}")
+    return load_dataset("json", data_files=files)
 
 
 def prepare_split(
@@ -137,6 +192,7 @@ def prepare_split(
     max_length: int,
     include_tools: bool,
     max_samples: int | None,
+    template_kwargs: dict[str, Any] | None = None,
 ) -> tuple[Dataset, dict[str, int]]:
     if max_samples is not None:
         split = split.select(range(min(max_samples, len(split))))
@@ -153,7 +209,7 @@ def prepare_split(
                 "valid": False,
                 "invalid_reason": "tools_disabled",
             }
-        result = encode_example(row, tokenizer, max_length)
+        result = encode_example(row, tokenizer, max_length, template_kwargs=template_kwargs)
         counts["valid" if result["valid"] else result["invalid_reason"].split(":")[0]] += 1
         return result
 
@@ -187,17 +243,17 @@ def main() -> None:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    dataset = load_dataset(
-        args.dataset,
-        args.dataset_config,
-        revision=args.dataset_revision,
-    )
+    dataset = load_training_dataset(args)
+    # Why: Gemma 4 のように enable_thinking で描画が変わるテンプレートは、学習と推論で同じ値を
+    # 渡さないと assistant 直前の列が食い違う。推論側の chat_template_kwargs と同じ JSON を受ける。
+    template_kwargs = json.loads(args.chat_template_kwargs) if args.chat_template_kwargs else None
     train, train_stats = prepare_split(
         dataset["train"],
         tokenizer,
         args.max_length,
         args.include_tools,
         args.max_train_samples,
+        template_kwargs,
     )
     evaluation, eval_stats = prepare_split(
         dataset["validation"],
@@ -205,6 +261,7 @@ def main() -> None:
         args.max_length,
         args.include_tools,
         args.max_eval_samples,
+        template_kwargs,
     )
     (run_dir / "dataset_stats.json").write_text(
         json.dumps(
@@ -268,7 +325,7 @@ def main() -> None:
         tf32=True,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
-        optim="adamw_torch_fused",
+        optim=args.optim,
         logging_steps=args.logging_steps,
         save_strategy="steps",
         save_steps=args.save_steps,
@@ -299,8 +356,15 @@ def main() -> None:
         json.dumps(config, indent=2, default=str) + "\n",
         encoding="utf-8",
     )
-    trainer.train(resume_from_checkpoint=str(args.resume_from_checkpoint) if args.resume_from_checkpoint else None)
+    trainer.train(
+        resume_from_checkpoint=str(args.resume_from_checkpoint)
+        if args.resume_from_checkpoint
+        else None
+    )
     adapter_dir = run_dir / "adapter"
+    if args.fp32_weights:
+        # Why not fp32 のまま保存: vLLM の dtype=auto は fp32 のモデルを fp16 で配信し、Gemma は fp16 で溢れる。
+        trainer.model.to(torch.bfloat16)
     trainer.model.save_pretrained(adapter_dir)
     tokenizer.save_pretrained(adapter_dir)
     metrics = trainer.evaluate()

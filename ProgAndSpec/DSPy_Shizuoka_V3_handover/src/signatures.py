@@ -3,6 +3,7 @@
 V1をV2に移植。40+のcore_typeを動的に扱う。
 instance_schemaは不要（問題文に含まれる）。
 """
+
 from __future__ import annotations
 
 import dspy
@@ -50,43 +51,45 @@ class ParseInstance(dspy.Signature):
     depot = instance.get('depot', {})  # dict with keys [x, y]
     vehicles = instance.get('vehicles', [])  # list[4] of dicts with keys [id, capacity, fixed_cost, cost_per_km]
     """
+
     requirement: str = dspy.InputField(desc="Problem description mentioning variable names")
-    instance: str = dspy.InputField(desc="Instance dict with STRUCTURE ANALYSIS showing exact types and nested keys for each field")
-    parse_code: str = dspy.OutputField(desc="Python variable assignment statements using .get() with type-safe defaults for EVERY key. Include structure comments describing nested data.")
+    instance: str = dspy.InputField(
+        desc="Instance dict with STRUCTURE ANALYSIS showing exact types and nested keys for each field"
+    )
+    parse_code: str = dspy.OutputField(
+        desc="Python variable assignment statements using .get() with type-safe defaults for EVERY key. Include structure comments describing nested data."
+    )
 
 
 class GenerateOptimizationAlgorithm(dspy.Signature):
-    """Given a natural-language description of an optimization problem, output
-    an executable Python function `solve(instance) -> solution`.
+    """Write one Python function `def solve(instance):` that solves the optimisation problem in the requirement and RETURNS the solution. Never print it.
 
-    HARD RULES (never violate):
-    1. Define exactly one top-level function: `def solve(instance):`
-    2. RETURN the solution (never print). The returned object MUST match the
-       "Reference Solution Structure" section from the requirement — same
-       top-level field names and non-empty content.
-    3. NEVER return an empty schedule / empty routes / cost=0 — such solutions
-       are rejected with score=0.1.
-    4. Runtime budget: 30 seconds max. For OR-Tools, set a solver time limit
-       (e.g., `solver.parameters.max_time_in_seconds = 20`).
-    5. Wrap the algorithm body in try/except. On any failure, fall back to a
-       greedy heuristic that produces a NON-EMPTY solution.
-    6. SYNTAX SAFETY (avoid exec errors): the code must be valid Python.
-       Balance every parenthesis/bracket. NEVER write a trailing generator like
-       `model.Add(expr) for x in items` — instead use a real loop:
-       `for x in items: model.Add(expr)`. Test comprehensions have balanced ().
+    Contract
+    1. Match the "Required Return Schema" exactly: the same top-level field names and the same value shapes (a dict keyed by id stays a dict, a list stays a list). Fill the numeric objective field with the value your own solution actually achieves; recompute it from the solution before returning.
+    2. Read instance keys from the STRUCTURE section of the requirement and access them with `.get()` and safe defaults. Never invent keys.
+    3. Never return an empty or placeholder solution. If the main method fails, fall back to a simple constructive heuristic that still satisfies every constraint.
+    4. Finish within 30 seconds. Give every solver a time limit (about 20 seconds).
+    5. Allowed imports: math, random, heapq, itertools, collections, functools, typing, bisect, operator, json, copy, re, numpy, scipy, pulp, networkx, ortools. Nothing else. Wrap the body in try/except and use the fallback on any failure.
+    6. Valid Python only: balanced brackets, real `for` loops, no bare generator expressions as statements.
 
-    ALLOWED IMPORTS: math, random, heapq, itertools, collections, functools,
-    typing, bisect, operator, json, copy, re, ortools, scipy, pulp, networkx, numpy.
-    FORBIDDEN: os, sys, subprocess, socket, pickle, requests, urllib, importlib, ctypes.
-
-    Choose the algorithm and problem-specific tactics yourself. The requirement
-    text contains the instance data (raw JSON) and reference solution structure —
-    read them carefully.
+    Method
+    - Instances are small (a few to a few dozen entities). Prefer an exact method: enumerate permutations or subsets when the count is tiny (up to about 8 items or 9 jobs); otherwise model the problem with CP-SAT (`from ortools.sat.python import cp_model`) or as an LP (`from scipy.optimize import linprog`) and take the optimal value from the solver.
+    - Before returning, check your solution against every constraint listed in the requirement. Repair it or use the fallback if anything is violated.
+    - Keep ids exactly as the instance gives them (they may start at 0 or at 1) and use them the way the schema shows.
     """
-    requirement: str = dspy.InputField(desc="Full problem description including input/output format, instance data (raw JSON), and reference solution structure")
-    core_type: str = dspy.InputField(desc="Problem category (e.g., スケジューリング_混合整数計画, 配送・輸送_混合整数計画)")
-    parse_code: str = dspy.InputField(desc="Generic safe accessor helpers (get_list, get_dict, get_scalar). Instance keys are in the requirement text.")
-    algorithm_code: str = dspy.OutputField(desc="Complete Python source code defining `solve(instance)`. MUST return a NON-EMPTY solution matching the reference structure.")
+
+    requirement: str = dspy.InputField(
+        desc="Full problem description including input/output format, instance data (raw JSON), and required return schema"
+    )
+    core_type: str = dspy.InputField(
+        desc="Problem category (e.g., スケジューリング_混合整数計画, 配送・輸送_混合整数計画)"
+    )
+    parse_code: str = dspy.InputField(
+        desc="Generic safe accessor helpers (get_list, get_dict, get_scalar). Instance keys are in the requirement text."
+    )
+    algorithm_code: str = dspy.OutputField(
+        desc="Complete Python source code defining `solve(instance)`. MUST return a NON-EMPTY solution matching the required schema."
+    )
 
 
 class ImproveAlgorithm(dspy.Signature):
@@ -96,7 +99,7 @@ class ImproveAlgorithm(dspy.Signature):
     HARD RULES:
     1. Keep the signature `solve(instance)`.
     2. Address the SPECIFIC issues listed in the feedback (error type, missing
-       fields, empty output, timeout, worse-than-reference, etc.).
+       fields, empty output, timeout, worse-than-current-baseline, etc.).
     3. Never return empty containers or cost=inf as a "solution".
     4. Runtime budget: 30 seconds max.
 
@@ -107,9 +110,20 @@ class ImproveAlgorithm(dspy.Signature):
     Use the feedback to decide the next tactic (switch solver, add fallback,
     fix data access, change heuristic, etc.). Explain the reasoning briefly.
     """
+
     original_code: str = dspy.InputField(desc="Current algorithm code")
     parse_code: str = dspy.InputField(desc="Current parsing helpers")
-    feedback: str = dspy.InputField(desc="Diagnostic feedback: error category, cost gap vs reference, structural issues")
+    feedback: str = dspy.InputField(
+        desc="Diagnostic feedback: error category, cost gap vs reference, structural issues"
+    )
     core_type: str = dspy.InputField(desc="Problem category")
+    return_schema: str = dspy.InputField(
+        desc=(
+            "Required return schema: the top-level field names and types solve() must "
+            "return. Contains no target value."
+        )
+    )
     improved_parse_code: str = dspy.OutputField(desc="Improved parsing helpers (or keep the same)")
-    improved_code: str = dspy.OutputField(desc="Improved solve(instance) code that addresses the feedback")
+    improved_code: str = dspy.OutputField(
+        desc="Improved solve(instance) code that addresses the feedback"
+    )

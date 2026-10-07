@@ -1,0 +1,31 @@
+[project]
+name = "dspy-shizuoka-v3-handover"
+version = "0.1.0"
+description = "DSPy and GEPA prompt optimization experiment for optimization-code generation."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "dspy==3.3.0b1",
+    "networkx>=3.4,<4",
+    "numpy>=2.0,<3",
+    "ortools>=9.12,<10",
+    "pulp>=3,<4",
+    "scipy>=1.15,<2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4,<9",
+    "ruff>=0.12,<1",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+

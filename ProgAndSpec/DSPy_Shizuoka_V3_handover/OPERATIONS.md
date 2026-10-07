@@ -1,0 +1,781 @@
+# DSPy Shizuoka V3 運用手順
+
+このディレクトリはアプリケーションではなく、DSPy + GEPA で
+`solve(instance)` の生成指示を最適化する実験一式です。
+root の sequence distillation とは別ワークロードですが、OpenAI互換のローカルLLM
+配信基盤を共有します。
+
+## 構成
+
+| 層 | Python / runtime | 役割 |
+|---|---|---|
+| root `.runtime/train` | Python 3.13 / Torch CUDA 13 | Agents-A1-4B のLoRA蒸留 |
+| root `.runtime/vllm` または既存vLLM環境 | Python 3.13 / vLLM 0.20.0 | QwenをOpenAI互換APIで配信 |
+| 本ディレクトリ `.venv` | Python 3.11 / DSPy 3.3.0b1 | GEPA学習、生成、評価 |
+
+モデルをDSPyプロセスへ直接ロードしません。生成LMとreflection LMを別ポートで起動し、
+HTTP経由で接続します。既定の役割とrevisionは
+[`model_manifest.json`](model_manifest.json) に固定しています。
+
+- generation: `Qwen/Qwen3.6-27B`、port 7501
+- GEPA reflection: `Qwen/Qwen3.8-27B`、port 7502
+
+## 1. DSPyクライアント環境
+
+```bash
+cd ProgAndSpec/DSPy_Shizuoka_V3_handover
+uv sync --locked
+uv run python scripts/preflight.py --offline
+```
+
+offline preflight は次を検査します。
+
+- Python 3.11、DSPy 3.3.0b1、GEPA 0.1.1
+- `data/problems/` の100問と必須フィールド
+- Phase E / F の保存済みDSPyプログラムとdemos 2件
+- `safe_exec` のspawn実行
+
+100問中95問は数値目的値を選択できます。残り5問は数値目的が定義されていないため、
+数値比較の対象外です。
+
+## 2. ローカルQwenサーバー
+
+このサーバーでは、両モデルが次の共有cacheにあります。
+
+```bash
+cd /home/yy-lab/test_distillation
+export QWEN_HF_HOME=/home/yy-lab/test_DSPy/model/hf_home
+export QWEN_VLLM_ENV=/home/yy-lab/test_DSPy/.runtime/vllm/vllm-cu13
+```
+
+別ホストでは同じモデルrevisionを取得し、2変数だけ差し替えます。root側にvLLM環境を
+新設する場合は、先に次を実行します。
+
+```bash
+uv run scripts/bootstrap_vllm_env.py
+```
+
+root から2つのterminalで起動します。H200を1枚ずつ使うため、事前に
+`nvidia-smi` で両GPUが空いていることを確認します。
+
+generation server:
+
+```bash
+HF_HOME="$QWEN_HF_HOME" CUDA_VISIBLE_DEVICES=0 uv run scripts/serve_vllm.py \
+  --vllm-env-dir "$QWEN_VLLM_ENV" \
+  --model-path Qwen/Qwen3.6-27B \
+  --model-revision 6a9e13bd6fc8f0983b9b99948120bc37f49c13e9 \
+  --served-model-name Qwen/Qwen3.6-27B \
+  --port 7501 \
+  --max-model-len 131072 \
+  --speculative-config '{"method":"mtp","num_speculative_tokens":1}' \
+  --gpu-memory-utilization 0.85 \
+  --no-enable-log-requests --disable-log-stats \
+  --disable-uvicorn-access-log --generation-config vllm \
+  --reasoning-parser qwen3
+```
+
+reflection server:
+
+```bash
+HF_HOME="$QWEN_HF_HOME" CUDA_VISIBLE_DEVICES=1 \
+VLLM_USE_DEEP_GEMM=0 VLLM_MOE_USE_DEEP_GEMM=0 VLLM_DEEP_GEMM_WARMUP=skip \
+uv run scripts/serve_vllm.py \
+  --vllm-env-dir "$QWEN_VLLM_ENV" \
+  --model-path Qwen/Qwen3.8-27B \
+  --model-revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 \
+  --served-model-name Qwen/Qwen3.8-27B \
+  --port 7502 \
+  --max-model-len 131072 \
+  --speculative-config '{"method":"mtp","num_speculative_tokens":1}' \
+  --gpu-memory-utilization 0.85 \
+  --max-num-seqs 16 \
+  --no-enable-log-requests --disable-log-stats \
+  --disable-uvicorn-access-log --generation-config vllm \
+  --reasoning-parser qwen3
+```
+
+初回は重みロード後に `torch.compile` とCUDA graph warmupが走ります。この環境では
+両モデルをGPU 1で個別起動し、`/v1/models` とDSPy chat completionを確認済みです。
+Qwen3.6-27Bは起動完了まで約4分36秒、Qwen3.8-27Bは約4分半で、どちらも
+モデル重みのGPU使用量は51.1 GiBでした。
+
+### thinkingの扱い
+
+Qwen3系のchat templateは`enable_thinking`が未指定なら思考を開きます。本実験は
+指定を送らないので、**thinkingは有効のまま**です。切る場合は
+`train_gepa_v3.py --no-thinking` か `DSPY_GENERATION_ENABLE_THINKING=0` を使います。
+
+`--reasoning-parser qwen3` を付けると、思考文は`content`ではなく
+`reasoning_content`へ分離されます。付けないと`<think>`が本文に混ざったまま
+DSPyのJSONAdapterへ渡り、構造化出力のパースを妨げます。
+
+出力枠は思考文と最終出力の合計です。既定は 65,536 tokens（2026-09-07 まで 32,768）で、上限は
+`max_model_len` から入力長を引いた値です（Phase Eの先頭問題で入力8,905 tokens）。
+32,768 では Qwen3.8 の思考が切れて本文が空になる問題が 140 問中 21〜35 問あり、65,536 で
+4〜13 問に減ります（`RESCORE_REPORT.md` 15 章）。timeout の既定は 5,400 秒です。
+
+保存済みPhase Eプログラムの先頭問題は、Qwen3.6 tokenizerで入力8,905 tokensでした。
+context長は入力と最大出力の合計を収める必要があるため、比較時は131072を指定します。
+MTPは`num_speculative_tokens=1`で固定し、推論ログはquietオプションで抑制します。
+
+実 workload smokeでは、保存済みPhase Eと`prob_001`から1,731文字の
+`solve(instance)`を生成しました。AST検査と`safe_run`を通過し、
+`objective_value`、`optimal_sequence`、`note`を返しています。
+
+サーバー起動後、handover側からonline preflightを実行します。
+
+```bash
+cd ProgAndSpec/DSPy_Shizuoka_V3_handover
+uv run python scripts/preflight.py
+```
+
+1枚しか空いていない場合は、両方の `DSPY_*_MODEL` と `DSPY_*_API_BASE` を同じ
+起動済みモデルへ向ければ機能確認はできます。ただし、元実験の2モデル構成とは
+異なる条件です。
+
+## 3. 保存済みプログラムの再評価
+
+参照あり:
+
+```bash
+uv run python train_gepa_v3.py --eval-only --run-name phaseE-recheck
+```
+
+参照フリー:
+
+```bash
+uv run python train_gepa_v3.py --eval-only --no-reference \
+  --run-name phaseF-recheck
+```
+
+出力は `outputs/<run-name>/` に保存します。引き継ぎ時の
+`compiled_program_v3_gepa_*.json`、`evaluation_results_v3_gepa_*.json`、
+`data/best_known*.jsonl` は上書きしません。
+
+## 4. Qwen3.6 / Qwen3.8の同条件スコア比較
+
+port 7501と7502の両サーバーを起動した状態で、次を実行します。
+
+```bash
+uv run python scripts/score_qwen_models.py --run-name phaseE-qwen-comparison
+```
+
+既定では保存済みPhase Eプログラム、seed 42、temperature 0.0を使い、同じテスト20問を
+Qwen3.6-27B、Qwen3.8-27Bの順に評価します。学習やreflectionは実行しません。
+各モデルの生の評価結果と集計結果を次へ保存します。
+
+```text
+outputs/model_scores/phaseE-qwen-comparison/
+├── qwen3_6_27b/evaluation_results_v3_gepa_phaseE.json
+├── qwen3_8_27b/evaluation_results_v3_gepa_phaseE.json
+└── comparison.json
+```
+
+`comparison.json`には平均スコア、valid件数と率、status内訳、reference到達件数、順位、
+モデルrevision、プログラムとデータのSHA256、実際のテスト問題IDを記録します。
+問題IDが両モデルで一致しなければ比較不能として終了します。同点には同じ順位を付けます。
+実行前に条件だけ確認する場合は、ファイルを作らないdry-runを使います。
+
+```bash
+uv run python scripts/score_qwen_models.py --dry-run
+```
+
+GPU容量に余裕がある場合だけ `--parallel` で同時評価できます。別のモデル名、revision、
+endpointは `--qwen36-*` / `--qwen38-*` で上書きできます。revisionは期待値の記録であり、
+OpenAI互換APIからロード済みrevisionを検証するものではありません。
+
+この比較は同一プログラムでの推論スコアです。Phase Eプログラムは元のQwen3.6生成・
+Qwen3.8 reflection構成で最適化されているため、モデル固有に再最適化した最高性能の比較では
+ありません。
+
+`--no-reference` は保存済みPhase Fプログラムを再現評価するためのオプションです。
+同梱のPhase F成果物は歴史的成果物であり、修正後に再学習したPhase Fプログラムとの
+比較には使わないでください。
+
+### 改善前後プロンプト × 2モデルの100問比較
+
+GPUを1枚だけ使う場合は、Qwen3.6とQwen3.8を同じGPU 1で順番に起動します。
+各モデルについて、現在の未コンパイル`AlgorithmGenerator`を改善前、保存済みPhase Eを
+改善後として、100問を評価します。
+`--only-model`を指定すると、そのモデルの改善前後2条件だけを実行します。
+`--parallel`は同じモデルへ4つの子評価（改善前後 × 2 shard）を同時に送ります。
+GPUメモリに余裕が必要なため、vLLMの割当は`0.85`に固定します。
+
+まず、次の環境変数を設定した端末を用意します。
+
+```bash
+cd /home/yy-lab/test_distillation
+export QWEN_HF_HOME=/home/yy-lab/test_DSPy/model/hf_home
+export QWEN_VLLM_ENV=/home/yy-lab/test_DSPy/.runtime/vllm/vllm-cu13
+```
+
+#### Qwen3.6の部分実行
+
+端末AでQwen3.6をGPU 1へ割り当てます。
+
+```bash
+HF_HOME="$QWEN_HF_HOME" CUDA_VISIBLE_DEVICES=1 \
+VLLM_USE_DEEP_GEMM=0 VLLM_MOE_USE_DEEP_GEMM=0 VLLM_DEEP_GEMM_WARMUP=skip \
+uv run scripts/serve_vllm.py \
+  --vllm-env-dir "$QWEN_VLLM_ENV" \
+  --model-path Qwen/Qwen3.6-27B \
+  --model-revision 6a9e13bd6fc8f0983b9b99948120bc37f49c13e9 \
+  --served-model-name Qwen/Qwen3.6-27B \
+  --port 7501 \
+  --max-model-len 131072 \
+  --speculative-config '{"method":"mtp","num_speculative_tokens":1}' \
+  --gpu-memory-utilization 0.85 \
+  --max-num-seqs 16 \
+  --no-enable-log-requests --disable-log-stats \
+  --disable-uvicorn-access-log --generation-config vllm \
+  --reasoning-parser qwen3
+```
+
+端末Bで、サーバーの起動完了後にQwen3.6の改善前後を評価します。
+
+```bash
+cd /home/yy-lab/test_distillation/ProgAndSpec/DSPy_Shizuoka_V3_handover
+uv run python scripts/compare_prompt_models.py \
+  --only-model qwen3_6_27b \
+  --run-name prompt-model-qwen36 \
+  --parallel --shards 2
+```
+
+評価が終わったら、端末Aで`Ctrl-C`を入力してQwen3.6を停止します。
+`nvidia-smi`でGPU 1のプロセスがなくなったことを確認してから、Qwen3.8を起動します。
+この部分実行は2条件を保存し、`run_complete=true`、`partial=true`、
+`comparable=false`、`effects={}`になります。
+
+#### Qwen3.8の部分実行
+
+Qwen3.6を停止した後、端末AでQwen3.8を同じGPU 1へ割り当てます。
+
+```bash
+HF_HOME="$QWEN_HF_HOME" CUDA_VISIBLE_DEVICES=1 uv run scripts/serve_vllm.py \
+  --vllm-env-dir "$QWEN_VLLM_ENV" \
+  --model-path Qwen/Qwen3.8-27B \
+  --model-revision 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 \
+  --served-model-name Qwen/Qwen3.8-27B \
+  --port 7502 \
+  --max-model-len 131072 \
+  --speculative-config '{"method":"mtp","num_speculative_tokens":1}' \
+  --gpu-memory-utilization 0.85 \
+  --no-enable-log-requests --disable-log-stats \
+  --disable-uvicorn-access-log --generation-config vllm \
+  --reasoning-parser qwen3
+```
+
+端末Bで、サーバーの起動完了後にQwen3.8の改善前後を評価します。
+
+```bash
+cd /home/yy-lab/test_distillation/ProgAndSpec/DSPy_Shizuoka_V3_handover
+uv run python scripts/compare_prompt_models.py \
+  --only-model qwen3_8_27b \
+  --run-name prompt-model-qwen38 \
+  --parallel --shards 2
+```
+
+評価が終わったら、端末AでQwen3.8を停止します。
+`nvidia-smi`でGPU 1のプロセスがなくなったことを確認し、GPU 1を解放します。
+
+#### 2つの部分成果物を統合
+
+両モデルの評価が成功したら、次のコマンドで4条件を統合します。
+
+```bash
+cd /home/yy-lab/test_distillation/ProgAndSpec/DSPy_Shizuoka_V3_handover
+uv run python scripts/compare_prompt_models.py \
+  --output-dir outputs/prompt_model_comparisons \
+  --run-name prompt-model-full100-merged \
+  --merge-runs \
+  outputs/prompt_model_comparisons/prompt-model-qwen36 \
+  outputs/prompt_model_comparisons/prompt-model-qwen38
+```
+
+統合時には、seed、temperature、max tokens、データマニフェスト、問題ID、
+改善前後プログラムのSHA256が一致するかを検査します。
+不一致の成果物は統合しません。
+成功時の`factorial_comparison.json`には、改善前後 × Qwen3.6/Qwen3.8の4条件と、
+`untouched40`、`legacy_test20`、`train40`、`all100`ごとの効果を保存します。
+
+```bash
+uv run python scripts/compare_prompt_models.py --dry-run
+```
+
+dry-runはサーバーへ接続せず、選択したモデルの子コマンドだけを表示します。
+
+#### 保存済みコードの再採点
+
+feasibilityチェッカーを追加・変更するとスコアの意味が変わるため、過去の
+`factorial_comparison.json`と新しい結果は直接比較できません。評価結果JSONには
+各問題の生成コードが保存されているので、LLMもGPUも使わずに再採点できます。
+
+```bash
+cd /home/yy-lab/test_distillation/ProgAndSpec/DSPy_Shizuoka_V3_handover
+uv run python scripts/rescore_with_checkers.py \
+  outputs/prompt_model_comparisons/prompt-model-qwen36 \
+  outputs/prompt_model_comparisons/prompt-model-qwen38 \
+  --subsets-from outputs/prompt_model_comparisons/prompt-model-full100-merged/factorial_comparison.json \
+  --output outputs/prompt_model_comparisons/rescored.json
+```
+
+各shardディレクトリを1つの評価単位として扱い、元実行と同じ順序で
+`BestKnownRegistry`を参照値からseedし直します。再実行したコストが保存値と
+食い違う問題は`cost_mismatches`へ記録します。ソルバーの時間制限や乱数を含む
+解法が該当するので、件数が多い場合は結果の解釈に注意してください。
+
+生成段階で落ちた`gen_error`のレコードにはコードが無いため、そのまま引き継ぎます。
+
+2026-09-01 に20 core_type 分のチェッカーを追加して4条件を再採点した結果と、
+その過程で見つかった欠陥は `RESCORE_REPORT.md` にまとめてあります。
+
+## 5. GEPA再学習
+
+2026-09-07 から、未コンパイルの `AlgorithmGenerator` の generate 指示文は compact
+（[src/signatures.py](src/signatures.py)、約 1.8KB）です。旧指示文は
+`prompts/original_generate_instructions.md` に残しています。GEPA 再学習はこの compact を
+初期指示文として始まります。Slurm では `scripts/slurm_gepa_retrain.sbatch` が GPU 2 枚で
+生成 LM と反省 LM を立ててから学習を回します。
+
+```bash
+RUN_NAME=gepa-compact-YYYYMMDD sbatch --export=ALL scripts/slurm_gepa_retrain.sbatch
+```
+
+`--num-threads`（既定 8）で候補の評価を並列に投げます。学習済みプログラムは
+`outputs/<run名>/compiled_program_v3_gepa_phaseE.json` に出るので、生成ホールドアウトでの評価は
+`slurm_eval_generated_one.sbatch` に `PROMPT=<ラベル> PROGRAM=<そのパス>` で渡します。
+
+2026-09-07 の再学習（GPU 2 枚で 11 時間 22 分）で得たプログラムは
+`prompts/compiled_program_v3_gepa_compact.json` に置いています。生成 140 問では Qwen3.8 で
+before に +0.17、compact に +0.12 の有意な差を示しましたが、効果は GEPA が見た雛形の未知
+instance に集中し、指示文は 34KB です（`RESCORE_REPORT.md` 17 章）。Qwen3.6 だけを使うなら
+compact で十分です。
+
+
+参照あり:
+
+```bash
+uv run python train_gepa_v3.py --breadth 6 --depth 8 \
+  --run-name phaseE-train
+```
+
+参照フリー:
+
+```bash
+uv run python train_gepa_v3.py --no-reference --breadth 6 --depth 8 \
+  --run-name phaseF-train
+```
+
+参照フリーモードでは、reference値と参照解の具体値をrequirementへ入れません。
+返却スキーマとして必要なトップレベルキーと型だけを残します。未登録scorerの目的値も
+候補解だけから正規化し、参照値は報酬・セルフベースラインに使用しません。
+
+別endpointを使う場合はCLIまたは環境変数で指定できます。
+
+```bash
+export DSPY_GENERATION_MODEL=Qwen/Qwen3.6-27B
+export DSPY_GENERATION_API_BASE=http://127.0.0.1:7501/v1
+export DSPY_REFLECTION_MODEL=Qwen/Qwen3.8-27B
+export DSPY_REFLECTION_API_BASE=http://127.0.0.1:7502/v1
+```
+
+認証が必要なendpointでは、credentialをコマンドへ書かず
+`DSPY_GENERATION_API_KEY` / `DSPY_REFLECTION_API_KEY` から渡します。
+
+## 6. 検証
+
+```bash
+uv run pytest -q
+uv run ruff check --select E9,F,I src scripts train_gepa_v3.py tests
+uv run python scripts/preflight.py --offline
+```
+
+学習済みPhase E/Fプログラムを同梱しない再学習用パッケージでは、成果物検査だけを
+`uv run python scripts/preflight.py --offline --skip-programs` で省略できます。
+
+保存済み評価結果は、旧メトリックの最大化誤判定と参照フリーprompt漏洩を含む
+歴史的成果物です。新しい実験結果との直接比較には、修正版で再評価した結果を使います。
+
+## 7. 雛形からの問題生成（検証済みホールドアウトの追加）
+
+既存の100問は前部門の生成器で作られ、生成器は同梱されていません。参照解も最適とは
+限らず、`beat_reference` が起きます。`src/datagen/` は既存問題を雛形にして、
+同じ形状の instance を乱数で作り、厳密ソルバーで参照解を付けます。
+
+- 問題文と requirements は雛形の文章をそのまま使うため、文章に書かれている件数・容量・
+  予算は雛形の値を保ち、それ以外の数値だけを引き直します。
+- 参照解は既存の feasibility チェッカーを `verified` かつ違反ゼロで通ったものだけを
+  書き出します。通らなければ生成自体が失敗します。
+- 各ソルバーは雛形 instance で元の参照値を再現することをテストで固定しています。
+- 生成 instance は世界に存在しなかったものなので、モデルが答えを記憶している可能性が
+  ありません。GEPA の候補選択にも demo にも使っていない集合として扱えます。
+
+```bash
+uv run python scripts/generate_problems.py --list
+uv run python scripts/generate_problems.py --per-template 5 --seed 20260904
+```
+
+出力は `data/problems_generated/prob_1001.json` 以降と `manifest.json` です。
+既存の `data/problems/` と `data_manifest.json` は変更しません。乱数は
+`seed:雛形ID:通番` で決まり、CP-SAT は 1 worker 固定なので、同じ引数なら別プロセスでも
+同じファイルになります。出力先に前回の `prob_*.json` が残っている場合は止まるので、
+入れ替えるときは `--force` を付けます。
+
+雛形は 2 段階で増やしました。2026-09-04 の 28 問（`data/problems_generated` の 140 問の元）と、
+2026-09-11 に追加した 61 問です。合計 89 問で、27 core_type のうち 25 を覆います。追加分の
+生成物は `data/problems_generated_ext`（prob_2001 以降、雛形ごとに 5 問、seed 20260904）に
+置き、140 問のホールドアウトとは別に保ちます（同じ出力先に混ぜると id が振り直され、140 問の
+結果ファイルと対応が取れなくなるためです）。
+
+```bash
+uv run python scripts/generate_problems.py --templates 4,5,6,7,8,11,12,13,19,20,22,23,24,25,26,28,32,34,35,37,38,40,41,42,44,45,46,48,49,50,51,52,53,54,56,57,58,60,61,63,64,65,66,70,72,74,75,76,78,82,84,86,87,88,90,92,93,95,96,98,99 \
+  --per-template 5 --seed 20260904 --start-id 2001 --output-dir data/problems_generated_ext
+```
+
+雛形にしていない同梱問題は 11 問です。
+
+| 問題 | 理由 |
+|---|---|
+| prob_009, 016, 017, 018, 069 | 参照解に数値の目的値がなく、参照値との一致で採点する枠組みに載らない |
+| prob_014 スポーツリーグ日程 | 全 30 試合を行うと総移動距離は日程に依存しない定数で、参照解は 4 試合分しか載せていない |
+| prob_015 教員授業表 | 目的が可行性のみで、参照解の `total_period_sum=0` を定義する式が問題文にない |
+| prob_027 配送＋在庫連立 | 顧客に発注点がなく訪問集合が一意に決まらない。配送量も未定義で容量制約を課せない |
+| prob_029 乗客ピックアップ | 目的「待機時間」が未定義。参照解は 1 台に 18 人（容量 4）を載せた実行不可能な経路 |
+| prob_030 貨物列車編成 | 列車数と集約の二目的で重みがなく、参照解の 5 本は最小の 1 本と整合しない |
+| prob_080 新聞売り子 | 問題文が価格・需要分布のすべての数値を固定しており、乱数で変える余地がない |
+
+同梱参照解が厳密最適でない雛形は `shipped_reference_optimal=False` で登録し、テストは
+参照値の再現ではなく「厳密解が参照値より良い」ことを確認します（最大化問題は
+`minimize=False` で向きを指定）。該当は 10 問です: prob_021（容量 15 の車両 1 台に需要 25、
+厳密 144 vs 245）、022（容量違反の単一経路）、023（回収→出荷順の違反）、024（デポ 3 の経路が
+近似）、026・028（切り捨て距離の単一経路）、011（作業員 7 > 容量 6）、012（申告 6 に対し実 14、
+メモリ超過）、020（ピーク 19 > 容量 8）。prob_025 の同梱解は容量違反で、実行可能解では
+到達できない安い値を申告しているため `shipped_reference_feasible=False` で大小比較を外して
+います。配送・輸送 系の同梱 note は「ortools routing近似解」なので、この core_type の
+`beat_reference` は参照値が近似解であることを踏まえて読みます。
+
+prob_082（キャッシュフローマッチング）は問題文にも instance にも債券の額面がありませんが、
+同梱参照解（債券 2 を 19.333 単位で 2 年目の負債 80 を償還で賄う）から額面 100 が一意に
+読めるので、その前提で雛形化しています。チェッカーも同じ額面で年別の負債充足を検証します。
+
+**生成集合は最終ホールドアウトとして扱います。** GEPA の train/val、demo、候補選択、
+停止判断のどれにも使いません。評価に使う集合は seed とテンプレート一覧を manifest に
+記録し、比較する条件間で同じ manifest を使います。
+
+生成した集合を保存済みプログラムで評価するには、全問をテスト側に置きます。
+
+```bash
+uv run python train_gepa_v3.py --eval-only --data-dir data/problems_generated \
+  --n-train 0 --n-test 60 --run-name phaseE-generated60
+```
+
+雛形を増やすときは `src/datagen/templates_*.py` のいずれか（分野別、`_ext` が 2026-09-11 の
+追加分）に `(generate, solve)` の組を登録し、`tests/test_datagen.py` が雛形の参照値を再現できる
+ことと、生成問題がチェッカーを通ることを自動で確認します。`src/datagen/__init__.py` が
+モジュールを import した時点で登録されます。
+
+## 8. Slurm での生成ホールドアウト評価
+
+このサーバーは Slurm（partition `p1`、GPU 2 枚）で GPU を管理します。生成集合の評価は
+`scripts/slurm_eval_generated.sbatch` を handover ディレクトリから投入します。1 ジョブで
+GPU 2 枚を確保し、GPU0 に Qwen3.6、GPU1 に Qwen3.8 を立て、両サーバーの `/v1/models` が
+応答してから改善前後 × 2 モデルの 4 条件を 2 shard ずつ同時に流します。ジョブ終了時に
+サーバーも止まります。
+
+```bash
+cd ProgAndSpec/DSPy_Shizuoka_V3_handover
+export QWEN_HF_HOME=/home/yy-lab/test_DSPy/model/hf_home
+export QWEN_VLLM_ENV=/home/yy-lab/test_DSPy/.runtime/vllm/vllm-cu13
+sbatch scripts/slurm_eval_generated.sbatch
+squeue -u "$USER"
+```
+
+ログは `outputs/slurm/<job名>-<jobid>.out` と `outputs/slurm/<run名>/`（vLLM 2 台分、preflight、
+compare）に、結果は `outputs/prompt_model_comparisons/<run名>/factorial_comparison.json` に
+出ます。`RUN_NAME`、`DATA_DIR`、`SHARDS` は環境変数で上書きできます。
+
+生成集合では `compare_prompt_models.py --data-dir` が manifest.json を見て、分割を
+`all`（全問）と `domain_<分野>` に切り替えます。`primary_subset` は `all` です。
+100 問の実測では Qwen3.6 が 1 条件あたり約 1 時間、Qwen3.8 が約 1.7 時間だったので、
+140 問 × 2 モデル同時実行は 3 時間前後を見込み、`--time` は 8 時間にしています。
+
+1 モデル × 1 プロンプト条件を GPU 1 枚で評価するジョブは `scripts/slurm_eval_generated_one.sbatch`
+です。Qwen3.8 は Qwen3.6 の 3 倍以上遅いので、条件ごとにジョブを分けると空いた GPU から
+順に走り、他ユーザーと GPU を分け合う状況でも止まりません。`MAX_TOKENS` の既定は 65,536、
+`LM_TIMEOUT` は 5,400 秒です（`RESCORE_REPORT.md` 15 章）。
+
+```bash
+export RUN_NAME=generated140-YYYYMMDD
+MODEL_LABEL=qwen3_8_27b PROMPT=before sbatch --export=ALL scripts/slurm_eval_generated_one.sbatch
+MODEL_LABEL=qwen3_8_27b PROMPT=after  sbatch --export=ALL scripts/slurm_eval_generated_one.sbatch
+```
+
+before / after 以外の指示文は、保存済み DSPy プログラムを `PROGRAM` で渡します。
+`scripts/build_prompt_variants.py` が `prompts/` に 2 つの変種を書き出します。
+
+- `compiled_program_v3_compact.json`: 共通原則だけの短い指示文（約 1.8KB）。demo は Phase E
+  と同じ 2 件なので、Phase E との差は指示文の本文だけです。
+  最終採点系では Phase E と統計的に同等で（`RESCORE_REPORT.md` 16 章）、今後の既定の指示文として
+  推奨します。
+- `compiled_program_v3_before_demos.json`: 初期指示文に Phase E と同じ demo 2 件だけを付けた対照条件。
+  compact − before の差が本文によるものか demo によるものかを切り分けます。
+- `compiled_program_v3_modular.json`: compact と同じ指示文に、`.supplements.json` の分野別補足
+  （9 分野、各 500 文字前後）を実行時に 1 つだけ選んで requirement の末尾に付けます。
+  補足の選択は `AlgorithmGenerator.supplement_for` が core_type から行います。
+
+```bash
+uv run python scripts/build_prompt_variants.py
+MODEL_LABEL=qwen3_6_27b PROMPT=compact PROGRAM=prompts/compiled_program_v3_compact.json \
+  sbatch --export=ALL scripts/slurm_eval_generated_one.sbatch
+MODEL_LABEL=qwen3_6_27b PROMPT=modular PROGRAM=prompts/compiled_program_v3_modular.json \
+  sbatch --export=ALL scripts/slurm_eval_generated_one.sbatch
+```
+
+DSPy は `~/.dspy_cache` に応答をキャッシュします。temperature 0 で同じプロンプトとモデルなら、
+中断したジョブで生成済みの問題はキャッシュから即座に返るので、再投入しても生成し直しには
+なりません。条件を変えずに独立した再実行が必要なときはキャッシュを退避してください。
+
+## 9. この問題集に特化した小型 solver の SFT
+
+Fable と Qwen の正解コードを教師にして、Agents-A1-4B をこの問題集専用の solver に学習します。
+データは「新しい instance で実際に正解したコード」だけなので、特定 instance に依存した
+コードは自然に落ちます。
+
+```bash
+uv run python scripts/build_sft_dataset.py            # data/sft/{train,validation,test}.jsonl と問題集
+sbatch scripts/slurm_train_solver.sbatch              # ルートの .runtime/train で LoRA 学習
+# 学習後、ルートで adapter を焼き込む
+(cd ../.. && .runtime/train/bin/python scripts/merge_adapter.py \
+  --adapter outputs/<run>/adapter --output outputs/<run>/merged)
+export QWEN_VLLM_ENV=/home/yy-lab/test_DSPy/.runtime/vllm/vllm-cu13
+LABEL=base__agents_a1_4b sbatch --export=ALL scripts/slurm_eval_solver.sbatch
+MODEL_PATH=../../outputs/<run>/merged LABEL=sft__agents_a1_4b sbatch --export=ALL scripts/slurm_eval_solver.sbatch
+```
+
+- 学習・検証・テストの instance は seed を分けて生成します（既定 90001 / 90002 / 90003、雛形ごとに
+  40 / 4 / 5 問）。テスト集合 `data/sft/problems_test` と生成 140 問の両方で評価します。
+  生成は雛形ごとに別プロセスで並列に行い、id の並びは一括生成と同じです（`--workers`）。
+- 教師コードの出典は、生成 140 問への解（Fable、Qwen 各条件）に加えて、同梱 100 問への解
+  （Qwen3.6 / 3.8 の before・after、Gemma 4 12B、Ministral 3）です。同梱問題は自分自身が雛形なので、
+  2026-09-11 に追加した 61 雛形の教師はここから取れます。同梱参照解が近似解の問題では正しいコードが
+  `beat_reference` になるため、候補集めでは `exact_match` と `beat_reference` の両方を通し、
+  新 instance の厳密解での再検証で選別します。教師コードが 1 件もない雛形は `stats.json` の
+  `templates_without_teacher` に出ます。その雛形はテスト集合には入りますが学習対は 0 件です。
+  どのモデルも正解していない雛形には `prompts/teacher_codes/prob_XXX.py` に手書きの `solve()` を
+  置けます（番号が雛形 id、同じ番号のファイルは複数可）。出典の優先順では最後で、他の出典と同じく
+  新 instance で再検証してから学習対になります。
+- 入力は system = 既定の指示文（compact）、user = 参照値を含まない requirement です。学習時も
+  評価時も同じ形式で、`scripts/evaluate_solver_model.py` が DSPy を通さず直接 API を叩きます。
+- 評価結果は compare の shard 形式で `outputs/prompt_model_comparisons/<run>/` に出るので、
+  `rescore_with_checkers.py` と同じ集計が使えます。
+- **推論時は `enable_thinking: false` を渡します。** Qwen3 系のテンプレートは学習データの assistant
+  冒頭に空の思考ブロック `<think>\n\n</think>\n\n` を描画します。既定のテンプレートで推論すると
+  `<think>\n` を開いたまま渡すので、学習で見ていない状態から思考を始めて出力枠を使い切ります。
+  評価ジョブの既定はこの設定です。素のモデルを思考ありで測るときだけ `EXTRA_BODY='{}'` で上書きし、
+  そのときは `MAX_MODEL_LEN` を `MAX_TOKENS` + 4096 以上にします（足りなければジョブが先に止まります）。
+- 土台を差し替えるときは `EXTRA_ARGS='--model <repo> --model-revision main'` を渡します。Gemma 4 のように
+  `enable_thinking` で描画が変わるテンプレートは `--chat-template-kwargs {"enable_thinking":true}` も渡し、
+  評価の `EXTRA_BODY` と一致させます（22 章。JSON は空白なしで 1 語にします）。
+- **汎化の測定**は `EXCLUDE_TEMPLATED_DIRS=data/problems` を付けて `data/problems` を DATA_DIRS に含めます。
+  出荷 100 問から雛形化済みの問題を除いた分だけを解かせます（`--exclude-templated` は
+  `src.datagen.TEMPLATES` の問題番号を除きます）。`RESCORE_REPORT.md` 20 章・22 章の「雛形外 72 問」は
+  雛形が 28 問だった時点の集合です。2026-09-11 に雛形を 89 問へ増やしたので、いま残る雛形外は
+  prob_009, 014, 015, 016, 017, 018, 027, 029, 030, 069, 080 の 11 問で、そのうち数値目的があるのは
+  6 問しかありません。雛形外の汎化を今後も測るなら、雛形の一部を学習から外して（`--templates` で
+  雛形を絞り、評価側は外した雛形の生成問題を使う）測ります。
+- **全層学習（FFT）は fp32 の主重みで行います。** bf16 の重みのまま `--full-finetune` すると、学習率 1e-5 の更新が
+  丸めで消えて学習が進みません（`RESCORE_REPORT.md` 28 章）。12B では
+  `--full-finetune --fp32-weights --model-parallel --max-memory {"0":"16GiB","1":"60GiB"} --optim adamw_bnb_8bit` を
+  `EXTRA_ARGS` に渡し、`sbatch --gres=gpu:2 --mem=200G` で GPU 2 枚に分けます。保存は bf16 で、`processor_config.json` は
+  評価の前に土台のスナップショットから写します。複数の SFT データは `scripts/merge_sft_datasets.py` でまとめ、
+  評価は `scripts/summarize_solver_runs.py` で学習データと同じ基準の正解数にします。
+
+### 9.1 他の候補モデルを同じ枡で測る
+
+同じジョブで Hugging Face 上のモデルを zero-shot 評価できます。配信名・reasoning parser・思考の
+制御・キャッシュの場所を環境変数で差し替えます。Gemma 4 12B は encoder なしの統合アーキテクチャで
+vLLM 0.20.0 に登録がないため、ルートで `bootstrap_vllm_env.py --env-dir .runtime/vllm-0.28
+--vllm-version 0.28.0` を作って `VLLM_ENV` で指します。
+
+```bash
+export QWEN_VLLM_ENV=/home/yy-lab/test_DSPy/.runtime/vllm/vllm-cu13
+export RUN_NAME=candidates-20260908 DATA_DIRS="data/problems_generated data/problems" \
+       EXCLUDE_TEMPLATED_DIRS=data/problems MODEL_HF_HOME=/home/yy-lab/test_DSPy/model/hf_home
+# Gemma 4 12B（vLLM 0.28）: 思考なし / 思考あり 64k
+export VLLM_ENV=$PWD/../../.runtime/vllm-0.28 MODEL_PATH=google/gemma-4-12B-it SERVED=gemma4-12b REASONING_PARSER=gemma4
+LABEL=gemma4_12b_nothink EXTRA_BODY='{"chat_template_kwargs": {"enable_thinking": false}}' \
+  sbatch --export=ALL scripts/slurm_eval_solver.sbatch
+LABEL=gemma4_12b_think EXTRA_BODY='{"chat_template_kwargs": {"enable_thinking": true}}' \
+  MAX_TOKENS=65536 MAX_MODEL_LEN=73728 EVAL_TIMEOUT=5400 sbatch --time=08:00:00 --export=ALL scripts/slurm_eval_solver.sbatch
+# Ministral 3 14B Reasoning（vLLM 0.20 で可）: 常時思考。推奨 system prompt を指示文の前に置く
+unset VLLM_ENV
+LABEL=ministral3_14b_reasoning MODEL_PATH=mistralai/Ministral-3-14B-Reasoning-2512 SERVED=ministral3-14b-reasoning \
+  REASONING_PARSER=mistral EXTRA_BODY='{}' SYSTEM_PREFIX_FILE=prompts/ministral3_reasoning_system.txt \
+  MAX_TOKENS=65536 MAX_MODEL_LEN=73728 EVAL_TIMEOUT=5400 sbatch --time=08:00:00 --export=ALL scripts/slurm_eval_solver.sbatch
+```
+
+- Ministral 3 は transformers 側の tokenizer が mistral-common になり、system を渡すとテンプレート既定の
+  思考用 system が入りません。`SYSTEM_PREFIX_FILE` で同じ文を前置し、思考ありの条件を保ちます。
+- 生成 140 問は全問が雛形由来なので、`EXCLUDE_TEMPLATED_DIRS` には `data/problems` だけを入れます。
+
+## 10. 既知の限界
+
+- 95問は数値目的を選択できますが、5問は数値目的がありません。
+- 旧チェッカー（feasibility.py 直登録の8 core_type）は `jobs` や `customers` キーのない
+  instance を検証せずに feasible と返します。同梱参照解の4つの形（prob_002・003・012・027）
+  だけは `feasibility_shapes.py` で ID・容量・目的値まで検証しますが、他の形は構造検査のみです。
+- prob_012（クラスタバッチジョブ）の同梱参照解は、割り当てたジョブの優先度合計 14 に対して
+  `total_priority: 6` と申告しており、参照値として使えません。
+- prob_027（配送＋在庫連立）は訪問先を選ぶ問題なので、訪問先が違う解どうしの総距離は比較
+  できません。参照値との比較は意味を持ちません。
+- 配送・輸送 系の同梱参照解は近似解で、prob_021 は容量制約に違反しています。
+  この core_type の参照値は上限の目安にすぎません。
+- feasibility checker未登録の問題は `unverified` とし、参照一致・参照超えに数えません。
+- `safe_exec` は既知のdunder/import迂回を拒否しますが、Python sandboxを安全境界とは
+  みなしません。信頼できない生成コードは、権限を落としたコンテナ等で実行してください。
+- 既定のbreadth 6 / depth 8は長時間実行です。接続確認では小さい値を使います。
+- Phase E の指示文の優位は採点系の欠陥への適応で、修正後は初期指示文や compact と区別できません
+  （`RESCORE_REPORT.md` 16 章）。GEPA を再学習する前に、採点系が直っていることを確認してください。
+- 4B・12B とも思考モードはこの課題で収束しません。素の 4B は 64k 枠で 140 問中 115 問、Gemma 4 12B は
+  139 問が枠切れです（`RESCORE_REPORT.md` 15・21 章）。思考なしで測り、SFT も思考なしの描画で行ってください。
+- Slurm 外で GPU を直接使うときは、配信の停止で EngineCore が残らないか `nvidia-smi` で確認してください。
+  ジョブはプロセスグループごと止めますが、手で kill した場合は残ることがあります。
+- 特化 SFT した 4B（`RESCORE_REPORT.md` 19 章）は学習した 28 雛形の外では素の 4B を下回ります
+  （雛形外 70 問で 0.602 → 0.430、20 章）。土台を Gemma 4 12B にしても同じで、雛形外は 1.050 → 0.646 に
+  落ちます（22 章）。雛形内は 4B と 12B で差がなく、雛形外を含む運用では素の Gemma 4 12B 思考なしを
+  そのまま使うほうが強いです。対象範囲を広げるには雛形を増やすか、忘却を抑える学習を試す必要があります。
+  2026-09-11 に雛形を 89 問へ増やしたので、同梱 100 問のうち種別として学習に入らないのは 11 問に
+  なりました（7 章）。この 11 問は目的値のない問題や定義の曖昧な問題で、汎化の物差しとしては
+  使いにくくなっています。
+- 修正済み採点系で再学習した GEPA（17 章）は Qwen3.8 で有意に効きますが、検証 13 問は満点で
+  飽和し、学んだ規則は見た雛形に固有です。見ていない問題種別への汎化は測れていません。
+- Qwen3.8 は思考が `max_tokens` 32,768 を使い切って本文が空になる問題が 140 問中 21〜35 問
+  あります。65,536 にすると 4〜13 問に減り、Qwen3.6 との差の大半が消えます
+  （`RESCORE_REPORT.md` 14〜15 章）。Qwen3.8 を含む比較では `MAX_TOKENS=65536` を使ってください。
+
+## 11. 大規模問題集（data/problems_hard）
+
+`data_hard.zip` / `data_hard2.zip` の問題は `scripts/import_hard_problems.py` で `data/problems_hard/prob_301〜330`
+に取り込みます。参照解はヒューリスティック解なので `objective_value` と解の構造だけを `reference_solution` に置き、
+下界・手法・最適性は `reference_meta` に残します。zip が途中で切れていても読める分だけ復元します。
+壊れた参照値の置き換え（prob_328 の生産費二重計上）は同スクリプトの `REFERENCE_OVERRIDES` にあります。
+
+- 採点は `src/utils/hard/` の検証器が行います。core_type ではなく instance の形で種別を判定し、申告値を使わず
+  目的値を再計算します（`RESCORE_REPORT.md` 24 章）。新しい種別を足すときは `register_kind` で登録し、
+  同梱参照解が `objective_value` を再現するテストを `tests/test_hard_<群>.py` に置きます。
+- 問題文に書いた実行上限（600 秒）と採点側の `--exec-timeout` / `EXEC_TIMEOUT` を揃えます。
+  `scripts/slurm_eval_generated_one.sbatch` と `scripts/slurm_eval_solver.sbatch` の既定は 60 秒のままです。
+- 問題文が 2 万トークンを超える問題（ポートフォリオ 2 問）があるので、`slurm_eval_solver.sbatch` では
+  `MAX_MODEL_LEN=81920` 程度が必要です。
+- 文脈なしのモデルに解かせるときは `scripts/export_solver_prompts.py export` で 1 問 1 ファイルの入力を書き、
+  回答を `answers/<prob_id>.py` に置いて `collect` で compare の shard 形式にします。採点は
+  `scripts/rescore_with_checkers.py --data-dir data/problems_hard --timeout 600` です。
+- 再採点は 1 問あたり最大 600 秒かかるので、shard 単位で並列に回します（24 章では 16 並列で約 1 時間）。
+- 修復ループは `REPAIR_ATTEMPTS=2`（`--max-repair-attempts`）で有効になります。検証器の違反を見せて書き直させる
+  もので、大規模 28 問では 3 条件とも 2〜3 問しか救えませんでした（`RESCORE_REPORT.md` 25 章）。
+
+### 11.1 種別ごとの instance 生成と教師コードによる参照解
+
+`src/hardgen/` の生成器で 20 種別 × N instance を作り（`scripts/generate_hard_instances.py`）、
+`scripts/reference_hard_instances.py` で参照解を付けます（`collect` → `run` → `finalize`）。参照解は
+検証器を通った既存の solve() の最良解で、最適性は未証明です（`RESCORE_REPORT.md` 26 章）。
+出力は `data/problems_hard_gen/{train,validation,test}/` で、評価にはそのまま `--data-dir` に渡せます。
+`run` は 1 対あたり最大 `--timeout` 秒かかるので、800 instance × 95 教師で 32 並列・約 6 時間です。
+
+
+## 12. プロンプト最適化と fine-tuning の交互最適化（BetterTogether 型）
+
+目標（2027 年 3 月に最適化専用の小型エージェント）の 2 本目の柱で、GEPA と fine-tuning を交互に回します。
+1 周は「P: 学習済みモデル（student）の system 指示文を GEPA で進化 → W: 進化した指示文で解かせて正解を
+集め、指示文を差し替えたデータで学習し直す → P: 新しい student で再び GEPA」です。
+
+| 段 | 中身 | 道具 |
+|---|---|---|
+| P（GEPA） | student を GPU 0、反省の Qwen3.8 を GPU 1 に配信。学習時と同じ「system＝指示文、user＝問題文、出力＝コード」の形で解かせ、一般則だけを書かせる反省テンプレートで指示文を進化させる | `scripts/slurm_gepa_student.sbatch`（`scripts/gepa_student.py`、`src/student_program.py`） |
+| W1（標本） | 進化した指示文で大規模 train / validation（676 問）を解かせる | `slurm_eval_solver.sbatch` に `INSTRUCTION_FILE` |
+| W2（データ） | 正解（違反 0・参照から +10% 以内）だけを学習対にし、雛形・Opus のデータと合わせて全行の system を進化した指示文に差し替える | `build_hard_sft_dataset.py --runs ... --instruction-file`、`merge_sft_datasets.py --system-file` |
+| W3（学習） | 土台から LoRA を学習し直して焼き込む | `slurm_train_solver.sbatch`、ルートの `merge_adapter.py` |
+
+```bash
+export QWEN_HF_HOME=/home/yy-lab/test_DSPy/model/hf_home QWEN_VLLM_ENV=/home/yy-lab/test_DSPy/.runtime/vllm/vllm-cu13
+STUDENT_PATH=/var/tmp/yy-lab-ft/gemma4-12b-merged-lora-20261004-merged RUN_DIR=outputs/bt-r1/gepa \
+  GEPA_ARGS="--max-full-evals 6 --num-threads 8 --exec-timeout 600" sbatch --export=ALL scripts/slurm_gepa_student.sbatch
+```
+
+- 反省用の train は種別ごとに 1 問（20 問）、候補の採否は validation の種別ごとに 1 問（20 問）。問題文が
+  `--max-train-requirement-chars` を超える問題は反省に回さない（反省 LM の文脈を超えるため）。
+- student は温度 0 で解かせる。GEPA は同じ minibatch で親と子を比べて採否を決めるので、標本の揺れを入れない。
+- W1 の標本は train だけから取る。validation は GEPA の候補選択に使うので、学習に入れると次の P の評価が水増しされる。
+- DSPy の `BetterTogether(p=GEPA, w=BootstrapFinetune, strategy="p -> w -> p")` と同じ順序・同じ扱いにしている。
+  `BootstrapFinetune` はその時点の（進化した）指示文で学習データを作り、2 回目の p は進化した指示文から始まる
+  （論文本文は学習データの prompt を素の指示文に戻すと書くが、DSPy 3.3 の実装に合わせた）。
+  `dspy.BetterTogether` そのものを使わないのは、重み側が DSPy の LocalProvider（同一プロセスで起動・学習）を前提と
+  しており、Slurm の GPU 割り当て、Gemma 4 の 16k token 学習、vLLM 0.28 での配信をそこに載せられないため。
+  各段を Slurm のジョブにして依存関係でつなぎ、段ごとに同じテスト集合で測る。
+- 評価は段ごとに「student × 指示文」の組で、雛形テスト・大規模生成テスト・大規模元問題・雛形外 11 問
+  （`data/problems` に `EXCLUDE_TEMPLATED_DIRS`）を同じ条件で測る。
+- **修復段だけを進化させる（`--repair`）。** SFT 済み student は生成の指示文を書き換えると崩れる
+  （`RESCORE_REPORT.md` 29・31 章: 3 回とも採用 0）。`gepa_student.py --repair` は「生成（指示文固定、LM を直接
+  呼ぶ）→ 検証器 → 違反があれば修復」の 2 段プログラム（`src/student_program.StudentRepairSolver`）にし、GEPA
+  には修復段の指示文だけを進化させる。検証器は参照値を使わない（`src/verify_loop.verify_solution`）。
+  評価は `slurm_eval_solver.sbatch` に `REPAIR_INSTRUCTION_FILE=<gepa の instruction.md | default>` を渡すと
+  `scripts/evaluate_student_program.py` が同じ shard 形式で書く（`default` は既定の修復指示文で、修復ループ
+  だけの効果）。
+
+## 13. 種別ホールドアウトと、学習データが 0 件だった種別の修正（2026-10-06）
+
+### 13.1 種別ホールドアウト（学習で見ない種別での汎化の測定）
+
+`merge_sft_datasets.py --exclude-kinds a,b,c` で大規模問題の種別を丸ごと学習から外す（雛形の行は kind を持たず
+常に残る）。同じ族（fjsp と fjsp_setup など）が片方だけ学習に残ると近い種別からの転移を測ることになるので、
+族ごとに外す。17 種別（教師データのある種別）を 4 fold に分けた。
+
+| fold | 外す種別 |
+|---|---|
+| f1 | facility_2ech, facility_multi, facility_robust, clsp |
+| f2 | fjsp, fjsp_setup, cutting_1d, cutting_2d |
+| f3 | mcnd, mcnd_surv, nurse_roster, role_roster, crew_pairing_seniority |
+| f4 | pdptw, vrptw_md, prp, prp_tw |
+
+各 fold で 4B を LoRA 学習し（`slurm_train_solver.sbatch`）、焼き込んで大規模テスト 120・元問題 28・雛形外 11 を
+解かせる。fold の結果は「外した種別」の問題だけを集計し、素の 4B と比べる。
+
+### 13.2 学習データが 0 件だった種別
+
+- **乗務員ペアリング（prob_302 系）**: 検証器が 302 系（各便ちょうど 1 回、基地に戻る）と 312 系（1 回以上、基地発）を
+  math_type の括弧（全角 / 半角）で見分けるようにした（`src/utils/hard/rosters.py`、`check_feasibility_detailed` が
+  core_type を渡す）。同梱 prob_302 の参照解は 200 ペアリング中 116 が基地に戻らず、既知欠陥にした
+  （`tests/test_hard_rosters.py`）。生成 instance の参照解は、Opus の解答 5 本を教師に加えて
+  `reference_hard_instances.py run --kinds crew_pairing` で付け直す。
+- **ポートフォリオ 2 種別**: 問題文の構造要約が行列（300×1200）の先頭 3 行をそのまま書き出し、3 万字を超えていた。
+  行列は形と先頭 5 要素だけ書くようにし（`src/modules.py`）、問題文は約 4.5 万字 → 8.6 千字になった。
+  本体は実行時の `instance` にあり、解答コードはそこから読む。
+
+- **判定は CPU の空いているときに流す。** 大規模問題の解答は時間制限付きソルバーを使うので、GEPA や評価ジョブと同時に
+  `build_hard_sft_dataset.py` や `reference_hard_instances.py run` を走らせると解が悪くなり、正解の判定が変わる
+  （`RESCORE_REPORT.md` 32.4 節）。`sbatch -c 48` で他の CPU ジョブと重ならないようにするか、GPU ジョブの合間に流す。
+
+## 14. エージェントの実行経路（生成 → 隔離実行 → 検証 → 修復 → フォールバック）
+
+3 月の成果物「要件を入れると最適化プログラムを返す小型エージェント」の中核で、`report/20261007/next_steps_review.md`
+の C（4 者一致）に当たる。`src/agent.py` の `OptimizationAgent` が 1 問を次の順で処理し、コードと判定を返す。
+
+1. student（4B / 12B の SFT 済み、vLLM 配信）に問題文を渡してコードを生成
+2. サンドボックスで実行し、検証器で制約を確かめる（参照値は使わない。`src/verify_loop.verify_solution`）
+3. 違反や実行時エラーなら、指摘を見せて修復（最大 `--max-repairs`、既定 2）
+4. それでも通らなければ、フォールバック LM（大きいモデル。省略可）で同じ手順をもう 1 周
+5. 結果: `status`（solved / unverified / failed）、`code`、`objective`（検証器が再計算した目的値）、`violations`、
+   試行ごとの判定と秒数、`fallback_used`、`failure_reason`
+
+```bash
+uv run python scripts/solve_requirement.py data/problems_hard_gen/test/prob_4035.json \
+  --student-model student --student-api-base http://127.0.0.1:7601/v1 \
+  --fallback-model gemma4-12b --fallback-api-base http://127.0.0.1:7602/v1 --out result.json
+```
+
+- 入力はこの repo の問題レコード（JSON）。問題文は参照値を含めずに組み立てる。検証器が種別を知らない問題は
+  `unverified`（実行はできたが制約を機械的に確かめられない）として返し、solved とは区別する。
+- 修復段の指示文は `--repair-instruction-file` で差し替えられる（GEPA が進化させた `outputs/<run>/gepa/instruction.md`）。
+- 問題集での採点は `scripts/evaluate_student_program.py`（修復 1 回の `StudentRepairSolver`）か、同じ経路を
+  `slurm_eval_solver.sbatch` の `REPAIR_INSTRUCTION_FILE` で流す。

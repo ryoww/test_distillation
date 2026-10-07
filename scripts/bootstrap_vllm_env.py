@@ -15,6 +15,9 @@ def main() -> None:
     parser.add_argument("--env-dir", type=Path, default=RUNTIME_DIR / "vllm")
     parser.add_argument("--rebuild", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    # Why not 固定: 新しいアーキテクチャ（Gemma 4 12B の encoder なし統合版など）は新しい vLLM が
+    # 要る。既定の 0.20.0 は Agents-A1-4B の検証済み環境として残し、別 env-dir に新版を作る。
+    parser.add_argument("--vllm-version", default="0.20.0")
     args = parser.parse_args()
     configure_storage(include_uv=True)
 
@@ -32,7 +35,7 @@ def main() -> None:
             str(args.env_dir / "bin/python"),
             "--torch-backend",
             "auto",
-            "vllm==0.20.0",
+            f"vllm=={args.vllm_version}",
         ],
     ]
     for command in commands:

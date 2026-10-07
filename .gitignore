@@ -8,3 +8,4 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 DSPy_Shizuoka_V3_handover.zip
+.claude/settings.local.json

@@ -43,8 +43,15 @@ def _ids(rendered: Any) -> list[int]:
     return list(rendered)
 
 
-def _render(tokenizer: Any, messages: list[dict[str, Any]], tools: Any) -> list[int]:
-    kwargs = {"tokenize": True, "add_generation_prompt": False}
+def _render(
+    tokenizer: Any,
+    messages: list[dict[str, Any]],
+    tools: Any,
+    template_kwargs: dict[str, Any] | None = None,
+) -> list[int]:
+    # template_kwargs は chat template の分岐（Gemma 4 の enable_thinking など）を学習時にも
+    # 固定するためのもの。推論側と同じ値を渡すと、学習で見た列と推論の prompt が一致する。
+    kwargs = {"tokenize": True, "add_generation_prompt": False, **(template_kwargs or {})}
     if tools:
         kwargs["tools"] = tools
     return _ids(tokenizer.apply_chat_template(messages, **kwargs))
@@ -54,11 +61,16 @@ def _is_trainable(message: dict[str, Any]) -> bool:
     return message.get("role") == "assistant" and message.get("trainable", True)
 
 
-def _prefix_labels(tokenizer: Any, messages: list[dict[str, Any]], tools: Any):
+def _prefix_labels(
+    tokenizer: Any,
+    messages: list[dict[str, Any]],
+    tools: Any,
+    template_kwargs: dict[str, Any] | None = None,
+):
     previous: list[int] = []
     labels: list[int] = []
     for index, message in enumerate(messages):
-        current = _render(tokenizer, messages[: index + 1], tools)
+        current = _render(tokenizer, messages[: index + 1], tools, template_kwargs)
         if current[: len(previous)] != previous:
             raise ValueError(f"chat template is not prefix preserving at message {index}")
         suffix = current[len(previous) :]
@@ -67,8 +79,13 @@ def _prefix_labels(tokenizer: Any, messages: list[dict[str, Any]], tools: Any):
     return previous, labels, "prefix-differential"
 
 
-def _redaction_labels(tokenizer: Any, messages: list[dict[str, Any]], tools: Any):
-    full = _render(tokenizer, messages, tools)
+def _redaction_labels(
+    tokenizer: Any,
+    messages: list[dict[str, Any]],
+    tools: Any,
+    template_kwargs: dict[str, Any] | None = None,
+):
+    full = _render(tokenizer, messages, tools, template_kwargs)
     mask = [False] * len(full)
     assistant_indices = [index for index, message in enumerate(messages) if _is_trainable(message)]
     for index in assistant_indices:
@@ -76,7 +93,7 @@ def _redaction_labels(tokenizer: Any, messages: list[dict[str, Any]], tools: Any
         redacted[index]["content"] = f"__REDACTED_ASSISTANT_{index}__"
         redacted[index].pop("reasoning_content", None)
         redacted[index].pop("tool_calls", None)
-        other = _render(tokenizer, redacted, tools)
+        other = _render(tokenizer, redacted, tools, template_kwargs)
         opcodes = difflib.SequenceMatcher(a=full, b=other, autojunk=False).get_opcodes()
         for tag, start, end, _, _ in opcodes:
             if tag in {"replace", "delete"}:
@@ -86,13 +103,18 @@ def _redaction_labels(tokenizer: Any, messages: list[dict[str, Any]], tools: Any
     return full, labels, "structural-redaction"
 
 
-def encode_example(example: dict[str, Any], tokenizer: Any, max_length: int) -> dict[str, Any]:
+def encode_example(
+    example: dict[str, Any],
+    tokenizer: Any,
+    max_length: int,
+    template_kwargs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     messages = _messages(example["messages"])
     tools = _tools(example.get("tools"))
     try:
-        input_ids, labels, method = _prefix_labels(tokenizer, messages, tools)
+        input_ids, labels, method = _prefix_labels(tokenizer, messages, tools, template_kwargs)
     except (ValueError, TemplateError):
-        input_ids, labels, method = _redaction_labels(tokenizer, messages, tools)
+        input_ids, labels, method = _redaction_labels(tokenizer, messages, tools, template_kwargs)
 
     if len(input_ids) > max_length:
         return {

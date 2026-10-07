@@ -6,93 +6,91 @@
 - 最適化アルゴリズムだけでなく、パーススキームも改良
 
 構成:
-- Phase 1: robust parse codesをブートストラップ（try/except付き）
+- Phase 1: safe getterを使うparse codesをブートストラップ（AST検証付き）
 - Phase 2: GEPAでalgorithm_codeの最適化（parseは固定）
 - 評価: 参考値との比較 + best_knownの追跡
 
 Python 3.11で実行（gepaパッケージが必要）。
 """
+
 import argparse
+import ast
 import json
 import logging
 import os
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
-from collections import defaultdict
 
 import dspy
+from gepa.strategies.instruction_proposal import InstructionProposalSignature
 
 BASE_DIR = Path(__file__).parent
 sys.path.insert(0, str(BASE_DIR / "src"))
 
-from src.lm_config import configure_qwen_default
-from src.best_known import init_registry
 from src import best_known as _bk
-from src.modules import AlgorithmGenerator, strip_code_fence, default_parse_code
-from src.signatures import ParseInstance
-from src.data_loader import load_and_split, load_and_split_stratified, prepare_examples, convert_to_dspy_example, load_v3_data
-from src.requirement_builder import build_requirement
+from src.best_known import init_registry
+from src.data_loader import (
+    convert_to_dspy_example,
+    load_and_split_stratified,
+    load_split_dirs,
+    load_v3_data,
+    prepare_examples,
+    split_train_val_stratified,
+)
+from src.gepa_feedback_v3 import gepa_feedback_v3, set_exec_timeout, set_use_reference
+from src.lm_config import (
+    DEFAULT_GENERATION_API_BASE,
+    DEFAULT_GENERATION_MODEL,
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_REFLECTION_API_BASE,
+    DEFAULT_REFLECTION_MODEL,
+    DEFAULT_TIMEOUT,
+    configure_qwen_pair,
+    qwen_configs_from_env,
+)
 from src.metrics_v3 import evaluate_algorithm_v3
-from src.gepa_feedback_v3 import gepa_feedback_v3, set_use_reference
+from src.modules import AlgorithmGenerator, default_parse_code, load_supplements_for
+from src.requirement_builder import summarize_reference_solution
+from src.verify_loop import generate_verified, summarize_attempts
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 
 def bootstrap_parse_codes_v3(examples):
-    """Phase 1: robust parse codesを生成（try/except付き）。
-    
+    """Phase 1: safe getterとAST検証を備えたparse codesを生成。
+
     各core_typeに対して1回だけparse_codeを生成し、それを固定する。
     """
     logger.info("=" * 60)
     logger.info("Phase 1: Bootstrapping robust parse codes")
     logger.info("=" * 60)
-    
+
     parse_codes = {}
     seen_types = set()
-    
+
     for e in examples:
         ct = getattr(e, "core_type", None) or e["core_type"]
         if ct in seen_types:
             continue
         seen_types.add(ct)
-        
+
         inst = getattr(e, "instance", None) or e["instance"]
         instance_keys = ", ".join(inst.keys()) if inst else ""
-        
+
         logger.info(f"  Generating robust parse for '{ct}' (keys: {instance_keys[:60]}...)")
-        
+
         # Use default_parse_code as base (covers ALL keys with type info)
         parse_code = default_parse_code(inst)
-        
-        # Add try/except wrapper for robustness
-        lines = parse_code.split('\n')
-        robust_lines = []
-        for line in lines:
-            stripped = line.strip()
-            if stripped and not stripped.startswith('#'):
-                # Wrap in try/except
-                robust_lines.append(f"try:")
-                robust_lines.append(f"    {line}")
-                robust_lines.append(f"except (KeyError, TypeError, ValueError):")
-                # Add safe default based on type hint in comment
-                var_name = line.split('=')[0].strip()
-                if 'list' in stripped.lower():
-                    robust_lines.append(f"    {var_name} = []")
-                elif 'dict' in stripped.lower():
-                    robust_lines.append(f"    {var_name} = {{}}")
-                elif 'str' in stripped.lower():
-                    robust_lines.append(f"    {var_name} = ''")
-                else:
-                    robust_lines.append(f"    {var_name} = 0")
-            else:
-                robust_lines.append(line)
-        
-        parse_code = '\n'.join(robust_lines)
+
+        # default_parse_code already uses safe .get() accessors. Validate the
+        # complete block instead of wrapping function-body lines independently.
+        ast.parse(parse_code)
         parse_codes[ct] = parse_code
         logger.info(f"    -> Robust parse code ({len(parse_code)} chars)")
-    
+
     logger.info(f"Phase 1 complete: {len(parse_codes)} core_types with robust parse codes")
     return parse_codes
 
@@ -124,8 +122,14 @@ _GENERIC_PARSE_CODE = (
 )
 
 
-def build_demonstrations(data_dir, demo_ids=(1, 21), max_demos=2,
-                         results_path=None):
+def build_demonstrations(
+    data_dir,
+    demo_ids=(1, 21),
+    max_demos=2,
+    results_path=None,
+    *,
+    use_reference=True,
+):
     """既知良コード(beat_reference/exact_match)から少数のfew-shot demoを構築。
 
     GEPAは instructions を進化させるが demos は触らないため、
@@ -136,7 +140,8 @@ def build_demonstrations(data_dir, demo_ids=(1, 21), max_demos=2,
     parse_code) and output fields (reasoning, algorithm_code).
     """
     if results_path is None:
-        results_path = str(BASE_DIR / "evaluation_results_v3_gepa.json")
+        tag = "phaseE" if use_reference else "phaseF_noref"
+        results_path = str(BASE_DIR / f"evaluation_results_v3_gepa_{tag}.json")
     # Map instance_id -> known-good code from prior results
     code_by_iid = {}
     try:
@@ -144,25 +149,44 @@ def build_demonstrations(data_dir, demo_ids=(1, 21), max_demos=2,
             prev = json.load(f)
         for split in ("train", "test"):
             for r in prev.get(split, {}).get("results", []):
-                if r.get("status") in ("beat_reference", "exact_match") and r.get("code"):
+                status = r.get("status")
+                reference_good = status == "exact_match"
+                reference_free_good = r.get("score", 0) > 0 and status not in {
+                    "exec_error",
+                    "gen_error",
+                    "infeasible",
+                    "invalid_solution",
+                    "solver_failure",
+                }
+                if r.get("code") and (reference_good if use_reference else reference_free_good):
                     code_by_iid[r["instance_id"]] = r["code"]
     except Exception as e:
         logger.warning(f"Could not load demo source results: {e}")
         return []
 
-    records = {f"prob_{r.get('id',0):03d}": r for r in load_v3_data(data_dir)}
+    records = {f"prob_{r.get('id', 0):03d}": r for r in load_v3_data(data_dir)}
     demos = []
-    for did in demo_ids:
-        iid = f"prob_{did:03d}"
+    preferred = [f"prob_{did:03d}" for did in demo_ids]
+    candidate_ids = [iid for iid in preferred if iid in code_by_iid]
+    candidate_ids.extend(sorted(set(code_by_iid) - set(candidate_ids)))
+    for iid in candidate_ids:
         if iid not in code_by_iid or iid not in records:
             continue
-        ex = convert_to_dspy_example(records[iid])
+        ex = convert_to_dspy_example(records[iid], use_reference=use_reference)
+        target_wording = (
+            "the reference solution exactly"
+            if use_reference
+            else "the required solution schema exactly"
+        )
+        structure_wording = (
+            "the reference solution structure" if use_reference else "the required return schema"
+        )
         reasoning = (
             f"This is a {ex['core_type']} problem. I read the exact key names from "
-            f"the reference solution structure, choose an exact solver for small "
+            f"{structure_wording}, choose an exact solver for small "
             f"instances (or a greedy+local-search fallback), wrap everything in "
             f"try/except, and return a NON-EMPTY dict whose top-level keys match "
-            f"the reference solution exactly."
+            f"{target_wording}."
         )
         demo = dspy.Example(
             requirement=ex["requirement"],
@@ -174,22 +198,71 @@ def build_demonstrations(data_dir, demo_ids=(1, 21), max_demos=2,
         demos.append(demo)
         if len(demos) >= max_demos:
             break
-    logger.info(f"Built {len(demos)} demonstrations from {[f'prob_{d:03d}' for d in demo_ids]}")
+    logger.info("Built %s demonstrations from %s", len(demos), candidate_ids[: len(demos)])
     return demos
 
 
-def run_gepa_training(train_raw, val_raw, test_raw, breadth=3, depth=5, demos=None,
-                      out_tag="phaseE"):
-    """GEPAによる最適化訓練。"""
-    
+class TemplateInstructionProposer:
+    """GEPA 既定の指示文提案を、反省プロンプトだけ差し替えて行う ProposalFn。
+
+    Why not gepa_kwargs["reflection_prompt_template"]: dspy.GEPA は DspyAdapter が独自に提案するため
+    この引数を受け付けず、初期化で ValueError になる。
+    """
+
+    def __init__(self, template: str):
+        InstructionProposalSignature.validate_prompt_template(template)
+        self.template = template
+
+    def __call__(self, candidate, reflective_dataset, components_to_update):
+        lm = dspy.settings.lm  # dspy.GEPA が reflection_lm の context で呼ぶ
+
+        def call(prompt):
+            output = lm(prompt)[0]
+            return output["text"] if isinstance(output, dict) else output
+
+        return {
+            name: InstructionProposalSignature.run(
+                lm=call,
+                input_dict={
+                    "current_instruction_doc": candidate[name],
+                    "dataset_with_feedback": reflective_dataset[name],
+                    "prompt_template": self.template,
+                },
+            )["new_instruction"]
+            for name in components_to_update
+        }
+
+
+def run_gepa_training(
+    train_raw,
+    val_raw,
+    test_raw,
+    breadth=3,
+    depth=5,
+    demos=None,
+    out_tag="phaseE",
+    reflection_lm=None,
+    output_dir=BASE_DIR / "outputs",
+    num_threads=8,
+    seed_instruction=None,
+    reflection_template=None,
+    log_dir=None,
+):
+    """GEPAによる最適化訓練。
+
+    seed_instruction: 生成器の初期指示文を差し替える（None なら signatures.py の既定）。
+    reflection_template: GEPA の反省プロンプト（<curr_param> と <side_info> を含む）。
+    log_dir: 既存の GEPA ログを指すと、gepa_state.bin から続きを再開する。
+    """
+
     # Convert to DSPy examples
     train_examples = prepare_examples(train_raw)
     val_examples = prepare_examples(val_raw)
-    
+
     # === Phase 1: Bootstrap robust parse codes ===
     all_examples = train_examples + val_examples
     parse_codes = bootstrap_parse_codes_v3(all_examples)
-    
+
     # === Phase 2: GEPA training ===
     program = AlgorithmGenerator(parse_code_dict=parse_codes)
 
@@ -199,71 +272,89 @@ def run_gepa_training(train_raw, val_raw, test_raw, breadth=3, depth=5, demos=No
     if demos:
         program.generate.predict.demos = list(demos)
         logger.info(f"Attached {len(demos)} demonstrations to generate predictor")
+    if seed_instruction:
+        sig = program.generate.predict.signature
+        program.generate.predict.signature = sig.with_instructions(seed_instruction)
+        logger.info(f"Seed instruction replaced ({len(seed_instruction)} chars)")
 
     n_predictors = len(program.predictors())
     logger.info(f"Predictors: {n_predictors} (parse frozen, generate+improve trainable)")
-    
+
     ts = time.strftime("%Y%m%d_%H%M%S")
-    log_dir = str(BASE_DIR / "data" / "gepa_logs" / f"run_v3_{ts}")
-    os.makedirs(os.path.dirname(log_dir), exist_ok=True)
-    out_json = str(BASE_DIR / f"compiled_program_v3_gepa_{out_tag}.json")
-    
+    output_dir = Path(output_dir)
+    log_dir = str(log_dir or output_dir / "gepa_logs" / f"run_v3_{ts}")
+    os.makedirs(log_dir, exist_ok=True)
+    out_json = str(output_dir / f"compiled_program_v3_gepa_{out_tag}.json")
+
     logger.info("=" * 60)
     logger.info("Phase 2: GEPA Training")
     logger.info(f"  Breadth: {breadth}, Depth: {depth}")
     logger.info(f"  Train: {len(train_examples)}, Val: {len(val_examples)}")
     logger.info(f"  Robust parse codes for {len(parse_codes)} core_types")
     logger.info("=" * 60)
-    
+
     start_time = time.time()
-    
+
     max_evals = breadth * depth
-    
+
+    proposer = None
+    if reflection_template:
+        proposer = TemplateInstructionProposer(reflection_template)
+        logger.info(f"Custom reflection prompt template ({len(reflection_template)} chars)")
     optimizer = dspy.GEPA(
         metric=gepa_feedback_v3,
-        reflection_lm=dspy.settings.lm,
+        reflection_lm=reflection_lm or dspy.settings.lm,
         max_full_evals=max_evals,
         track_stats=True,
         log_dir=log_dir,
         seed=42,
+        num_threads=num_threads,
+        instruction_proposer=proposer,
     )
-    
+
     compiled = optimizer.compile(
         program,
         trainset=train_examples,
         valset=val_examples if val_examples else train_examples[:1],
     )
-    
+
     elapsed = time.time() - start_time
     logger.info(f"Training completed in {elapsed:.0f}s")
-    
+
     # Save compiled program
     try:
         compiled.save(out_json)
         logger.info(f"Saved compiled program to {out_json}")
     except Exception as e:
         logger.warning(f"compiled.save() failed: {e}")
-    
+
     return compiled
 
 
-def evaluate(compiled, raw_examples, name="Test", use_reference=True):
+def evaluate(
+    compiled,
+    raw_examples,
+    name="Test",
+    use_reference=True,
+    max_repair_attempts=1,
+    exec_timeout=60.0,
+):
     """評価: 各インスタンスに対してアルゴリズムを生成してスコアを計算。
 
     use_reference=False でも、参考値との比較 (beat-reference) は
     事後解析としてコスト比較から必ず計算する (報酬には使わない)。
     """
-    logger.info(f"\n{'='*60}")
+    logger.info(f"\n{'=' * 60}")
     logger.info(f"{name} Evaluation")
-    logger.info(f"{'='*60}")
-    
+    logger.info(f"{'=' * 60}")
+
     results = []
     parse_errors = 0
     exec_errors = 0
-    beat_reference = 0        # status-based (reference mode only)
-    beat_ref_analysis = 0     # post-hoc: cost <= reference (at or better)
-    beat_ref_strict = 0       # post-hoc: cost < reference (strictly better)
-    
+    beat_reference = 0  # status-based (reference mode only)
+    beat_ref_analysis = 0  # post-hoc: cost <= reference (at or better)
+    beat_ref_strict = 0  # post-hoc: cost < reference (strictly better)
+
     for i, ex in enumerate(raw_examples):
         iid = ex["instance_id"]
         requirement = ex["requirement"]
@@ -272,28 +363,53 @@ def evaluate(compiled, raw_examples, name="Test", use_reference=True):
         ref = ex.get("reference_value")
         ref_sol = ex.get("reference_solution", {})
         objective_text = ex.get("objective", "")
-        
+
         # Generate algorithm - only pass inputs defined in with_inputs()
         try:
-            pred = compiled(requirement=requirement, core_type=core_type)
-            code = pred.algorithm_code
+            if max_repair_attempts > 1:
+                # 返却フィールド名と型だけを渡す。目的値は include_values=False で落ちる。
+                return_schema = summarize_reference_solution(
+                    ref_sol, instance, include_values=False
+                )
+                code, _, attempts = generate_verified(
+                    compiled,
+                    requirement=requirement,
+                    core_type=core_type,
+                    instance=instance,
+                    max_attempts=max_repair_attempts,
+                    timeout=exec_timeout,
+                    return_schema=return_schema,
+                )
+                repair = summarize_attempts(attempts)
+            else:
+                pred = compiled(requirement=requirement, core_type=core_type)
+                code = pred.algorithm_code
+                repair = None
         except Exception as e:
-            logger.warning(f"  [{i+1}/{len(raw_examples)}] {iid}: Generation failed: {e}")
+            logger.warning(f"  [{i + 1}/{len(raw_examples)}] {iid}: Generation failed: {e}")
             parse_errors += 1
-            results.append({"instance_id": iid, "status": "gen_error", "score": -0.5, "error": str(e)})
+            results.append(
+                {"instance_id": iid, "status": "gen_error", "score": -0.5, "error": str(e)}
+            )
             continue
-        
+
         # Evaluate
         result = evaluate_algorithm_v3(
-            code=code, instance=instance, core_type=core_type,
-            instance_id=iid, reference_value=ref, reference_solution=ref_sol,
-            objective_text=objective_text, use_reference=use_reference,
+            code=code,
+            instance=instance,
+            core_type=core_type,
+            instance_id=iid,
+            reference_value=ref,
+            reference_solution=ref_sol,
+            objective_text=objective_text,
+            use_reference=use_reference,
+            timeout=exec_timeout,
         )
-        
+
         score = result["score"]
         status = result["status"]
         cost = result.get("cost")
-        
+
         # Count categories
         if result.get("parse_error", False):
             parse_errors += 1
@@ -305,57 +421,80 @@ def evaluate(compiled, raw_examples, name="Test", use_reference=True):
         # Post-hoc reference analysis (independent of scoring mode).
         # Only meaningful for feasible solutions that produced a real cost.
         beat_flag = False
-        if (cost is not None and ref is not None and ref != 0
-                and status not in ("exec_error", "infeasible", "invalid_solution",
-                                    "solver_failure", "suspicious_zero",
-                                    "partial_feasible", "gen_error")):
+        if (
+            cost is not None
+            and ref is not None
+            and ref != 0
+            and status
+            not in (
+                "exec_error",
+                "infeasible",
+                "invalid_solution",
+                "solver_failure",
+                "suspicious_zero",
+                "partial_feasible",
+                "unverified",
+                "gen_error",
+            )
+        ):
             if cost <= ref * (1 + 1e-6):
                 beat_ref_analysis += 1
                 beat_flag = True
             if cost < ref * (1 - 1e-6):
                 beat_ref_strict += 1
-        
+
         # Format output
         cost_str = f"{cost:.2f}" if cost is not None else "N/A"
         ref_str = f"{ref:.2f}" if ref is not None else "N/A"
-        logger.info(f"  [{i+1}/{len(raw_examples)}] {iid}: score={score:.2f} status={status} cost={cost_str} ref={ref_str} beat={beat_flag}")
-        
-        results.append({
-            "instance_id": iid,
-            "name": ex.get("name", "Unknown"),
-            "core_type": core_type,
-            "status": status,
-            "score": score,
-            "cost": cost,
-            "reference_value": ref,
-            "beat_reference_analysis": beat_flag,
-            "detail": result.get("detail", ""),
-            "error_category": result.get("error_category", ""),
-            "code": code,
-        })
-    
+        logger.info(
+            f"  [{i + 1}/{len(raw_examples)}] {iid}: score={score:.2f} status={status} cost={cost_str} ref={ref_str} beat={beat_flag}"
+        )
+
+        results.append(
+            {
+                "instance_id": iid,
+                "name": ex.get("name", "Unknown"),
+                "core_type": core_type,
+                "status": status,
+                "score": score,
+                "cost": cost,
+                "reference_value": ref,
+                "beat_reference_analysis": beat_flag,
+                "detail": result.get("detail", ""),
+                "error_category": result.get("error_category", ""),
+                "feasibility_verified": result.get("feasibility_verified", False),
+                # first-pass と修復後は別指標なので、混ぜずに残す。
+                "repair": repair,
+                "code": code,
+            }
+        )
+
     # Summary
     scores = [r["score"] for r in results]
     valid_scores = [s for s in scores if s > 0]
-    
+
     logger.info(f"\n{name} Summary:")
     logger.info(f"  Total: {len(results)}")
     logger.info(f"  Valid (score>0): {len(valid_scores)}")
     logger.info(f"  Beat reference (status): {beat_reference}")
     logger.info(f"  Beat reference (analysis, cost<=ref): {beat_ref_analysis}")
     logger.info(f"  Beat reference (analysis, cost<ref strict): {beat_ref_strict}")
-    logger.info(f"  Mean score: {sum(scores)/len(scores):.3f}" if scores else "  Mean score: N/A")
-    logger.info(f"  Mean valid score: {sum(valid_scores)/len(valid_scores):.3f}" if valid_scores else "  Mean valid score: N/A")
+    logger.info(f"  Mean score: {sum(scores) / len(scores):.3f}" if scores else "  Mean score: N/A")
+    logger.info(
+        f"  Mean valid score: {sum(valid_scores) / len(valid_scores):.3f}"
+        if valid_scores
+        else "  Mean valid score: N/A"
+    )
     logger.info(f"  Parse errors: {parse_errors}")
     logger.info(f"  Exec errors: {exec_errors}")
-    
+
     # Status breakdown
     status_counts = {}
     for r in results:
         s = r["status"]
         status_counts[s] = status_counts.get(s, 0) + 1
     logger.info(f"  Status breakdown: {status_counts}")
-    
+
     # Error category breakdown
     error_cats = {}
     for r in results:
@@ -363,10 +502,10 @@ def evaluate(compiled, raw_examples, name="Test", use_reference=True):
             error_cats[r["error_category"]] = error_cats.get(r["error_category"], 0) + 1
     if error_cats:
         logger.info(f"  Error categories: {error_cats}")
-    
+
     return {
         "results": results,
-        "mean_score": sum(scores)/len(scores) if scores else 0,
+        "mean_score": sum(scores) / len(scores) if scores else 0,
         "valid_count": len(valid_scores),
         "total_count": len(results),
         "beat_reference": beat_reference,
@@ -375,83 +514,215 @@ def evaluate(compiled, raw_examples, name="Test", use_reference=True):
     }
 
 
-def main():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="V3 GEPA Training")
     parser.add_argument("--breadth", type=int, default=6, help="GEPA breadth")
+    parser.add_argument(
+        "--num-threads", type=int, default=8, help="GEPA の候補評価を並列に投げるスレッド数"
+    )
     parser.add_argument("--depth", type=int, default=8, help="GEPA depth")
-    parser.add_argument("--data-dir",
-                        default=r"C:\Users\10001176547\Desktop\PythonCode\OptimizationDataCreater\data",
-                        help="データディレクトリ（100問）")
+    parser.add_argument(
+        "--data-dir",
+        default=str(BASE_DIR / "data" / "problems"),
+        help="データディレクトリ（100問）",
+    )
     parser.add_argument("--n-train", type=int, default=40, help="訓練問題数(層化選抜)")
+    parser.add_argument(
+        "--split-dirs",
+        action="store_true",
+        help="data-dir の train/validation/test を分割として使う（生成問題集用）",
+    )
+    parser.add_argument(
+        "--per-kind-train", type=int, default=0, help="--split-dirs: 種別あたり（0 は全件）"
+    )
+    parser.add_argument(
+        "--per-kind-val", type=int, default=0, help="--split-dirs: 種別あたり（0 は全件）"
+    )
+    parser.add_argument(
+        "--per-kind-test", type=int, default=0, help="--split-dirs: 種別あたり（0 は全件）"
+    )
+    parser.add_argument("--seed-instruction-file", type=Path, help="生成器の初期指示文を差し替える")
+    parser.add_argument(
+        "--reflection-template",
+        type=Path,
+        help="GEPA の反省プロンプト（<curr_param>, <side_info> を含む）",
+    )
+    parser.add_argument(
+        "--skip-final-eval",
+        action="store_true",
+        help="学習後の train/test 評価を省く（保存したプログラムを別ジョブで評価する）",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="既存の run ディレクトリを再利用し、その GEPA ログから再開する（Slurm の 8 時間上限をまたぐ）",
+    )
     parser.add_argument("--n-test", type=int, default=20, help="テスト問題数(層化選抜)")
     parser.add_argument("--train-ratio", type=float, default=0.8, help="(旧)訓練データの割合")
     parser.add_argument("--no-demos", action="store_true", help="few-shot demoを無効化")
-    parser.add_argument("--no-reference", action="store_true",
-                        help="参照フリーモード: 報酬・フィードバックに参考値を使わない(解析のみ)")
-    parser.add_argument("--eval-only", action="store_true", help="既存のコンパイル済みプログラムで評価のみ")
-    parser.add_argument("--program-path", default=str(BASE_DIR / "compiled_program_v3_gepa.json"),
-                        help="プログラムの保存/読込パス")
-    args = parser.parse_args()
-    
-    logger.info("="*60)
+    parser.add_argument(
+        "--no-reference",
+        action="store_true",
+        help="参照フリーモード: 報酬・フィードバックに参考値を使わない(解析のみ)",
+    )
+    parser.add_argument(
+        "--eval-only", action="store_true", help="既存のコンパイル済みプログラムで評価のみ"
+    )
+    parser.add_argument("--program-path", help="プログラムの保存/読込パス")
+    parser.add_argument("--demo-results", help="few-shot demoを抽出する既存評価結果JSON")
+    parser.add_argument("--output-dir", type=Path, default=BASE_DIR / "outputs")
+    parser.add_argument("--run-name")
+    parser.add_argument(
+        "--generation-model",
+        default=os.getenv("DSPY_GENERATION_MODEL", DEFAULT_GENERATION_MODEL),
+    )
+    parser.add_argument(
+        "--generation-api-base",
+        default=os.getenv("DSPY_GENERATION_API_BASE", DEFAULT_GENERATION_API_BASE),
+    )
+    parser.add_argument(
+        "--reflection-model",
+        default=os.getenv("DSPY_REFLECTION_MODEL", DEFAULT_REFLECTION_MODEL),
+    )
+    parser.add_argument(
+        "--reflection-api-base",
+        default=os.getenv("DSPY_REFLECTION_API_BASE", DEFAULT_REFLECTION_API_BASE),
+    )
+    parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    parser.add_argument(
+        "--max-repair-attempts",
+        type=int,
+        default=1,
+        help="1 keeps single-shot generation. 2+ verifies the solution and asks for a fix.",
+    )
+    parser.add_argument(
+        "--exec-timeout",
+        type=float,
+        default=60.0,
+        help="生成した solve() の実行を打ち切る秒数（大規模問題では問題文の上限と揃える）",
+    )
+    parser.add_argument(
+        "--no-thinking",
+        dest="enable_thinking",
+        action="store_const",
+        const=False,
+        default=None,
+        help="Send enable_thinking=false. Omit to let the chat template decide (thinking on).",
+    )
+    parser.add_argument("--lm-timeout", type=int, default=DEFAULT_TIMEOUT)
+    parser.add_argument("--skip-connection-check", action="store_true")
+    return parser.parse_args(argv)
+
+
+def check_lm_connection(lm, label):
+    """Send one bounded request before a long evaluation or GEPA run."""
+    response = lm(messages=[{"role": "user", "content": "Reply with exactly: OK"}], max_tokens=8)
+    if not isinstance(response, list) or not response:
+        raise RuntimeError(f"{label} LM returned no response")
+    logger.info("  %s connection OK: %s", label, str(response[0])[:40])
+
+
+def main(argv=None):
+    args = parse_args(argv)
+
+    logger.info("=" * 60)
     logger.info("V3: DSPy+GEPA Optimization Algorithm Generation")
-    logger.info("="*60)
+    logger.info("=" * 60)
 
     use_reference = not args.no_reference
     set_use_reference(use_reference)
+    set_exec_timeout(args.exec_timeout)
     out_tag = "phaseE" if use_reference else "phaseF_noref"
-    logger.info(f"  Reference mode: {'ON (reference-guided)' if use_reference else 'OFF (reference-free / RL-style)'}")
-    
-    # Configure LM
-    ok = configure_qwen_default()
-    if not ok:
-        logger.error("Failed to configure LM.")
-        sys.exit(1)
-    
-    # Test connection
-    try:
-        lm = dspy.settings.lm
-        test_resp = lm(messages=[{"role": "user", "content": "Say OK"}], max_tokens=5)
-        if isinstance(test_resp, list) and len(test_resp) > 0:
-            content = str(test_resp[0])[:20]
-        else:
-            content = "no response"
-        logger.info(f"  Connection OK: {content}")
-    except Exception as e:
-        logger.warning(f"  Connection test: {e}")
-    
-    # Initialize registry.
-    # Reference-free mode uses a separate, clean store and does NOT load the
-    # reference-seeded best_known.jsonl (which would leak reference values).
-    if use_reference:
-        storage = BASE_DIR / "data" / "best_known.jsonl"
-        init_registry(storage_path=storage)
-        _bk.registry.load_from_disk()
-    else:
-        storage = BASE_DIR / "data" / "best_known_noref.jsonl"
-        init_registry(storage_path=storage)
-        logger.info("Reference-free mode: fresh best_known registry (no disk load)")
-    
+    run_name = args.run_name or f"{out_tag}_{time.strftime('%Y%m%d_%H%M%S')}"
+    run_dir = args.output_dir.resolve() / run_name
+    program_path = (
+        Path(args.program_path)
+        if args.program_path
+        else (BASE_DIR / f"compiled_program_v3_gepa_{out_tag}.json")
+    )
+    logger.info(
+        f"  Reference mode: {'ON (reference-guided)' if use_reference else 'OFF (reference-free / RL-style)'}"
+    )
+    logger.info("  Run directory: %s", run_dir)
+
+    env_generation, env_reflection = qwen_configs_from_env()
+    # Why not pass None: CLI で指定がないときに None を渡すと、環境変数で
+    # 設定された enable_thinking を上書きして消してしまう。
+    thinking_override = (
+        {} if args.enable_thinking is None else {"enable_thinking": args.enable_thinking}
+    )
+    generation_lm, reflection_lm = configure_qwen_pair(
+        generation=replace(
+            env_generation,
+            model=args.generation_model,
+            api_base=args.generation_api_base,
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
+            **thinking_override,
+            timeout=args.lm_timeout,
+        ),
+        reflection=replace(
+            env_reflection,
+            model=args.reflection_model,
+            api_base=args.reflection_api_base,
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
+            **thinking_override,
+            timeout=args.lm_timeout,
+        ),
+    )
+    if not args.skip_connection_check:
+        try:
+            check_lm_connection(generation_lm, "generation")
+            if not args.eval_only:
+                check_lm_connection(reflection_lm, "reflection")
+        except Exception as exc:
+            logger.error("LM connection check failed: %s", exc)
+            raise SystemExit(2) from exc
+    run_dir.mkdir(parents=True, exist_ok=args.resume)
+
+    state_name = "best_known.jsonl" if use_reference else "best_known_noref.jsonl"
+    storage = run_dir / state_name
+    init_registry(storage_path=storage)
+    logger.info("Fresh best-known registry: %s", storage)
+
     # Load data (stratified 40/20 across core_types)
     logger.info(f"\nLoading data from {args.data_dir}...")
-    train_raw, test_raw = load_and_split_stratified(
-        args.data_dir, n_train=args.n_train, n_test=args.n_test, seed=42
-    )
-    logger.info(f"Train+Val: {len(train_raw)}, Test: {len(test_raw)}")
-    
-    # Split train into train/val (larger val for stronger GEPA signal)
-    n_val = max(3, len(train_raw) // 3)
-    val_raw = train_raw[-n_val:]
-    train_only_raw = train_raw[:-n_val]
+    if args.split_dirs:
+        splits = load_split_dirs(
+            args.data_dir,
+            {
+                "train": args.per_kind_train,
+                "validation": args.per_kind_val,
+                "test": args.per_kind_test,
+            },
+            use_reference=use_reference,
+        )
+        train_only_raw, val_raw, test_raw = splits["train"], splits["validation"], splits["test"]
+        n_val = len(val_raw)
+    else:
+        train_raw, test_raw = load_and_split_stratified(
+            args.data_dir,
+            n_train=args.n_train,
+            n_test=args.n_test,
+            seed=42,
+            use_reference=use_reference,
+        )
+        logger.info(f"Train+Val: {len(train_raw)}, Test: {len(test_raw)}")
+
+        # Split train into train/val (larger val for stronger GEPA signal)
+        n_val = max(3, len(train_raw) // 3)
+        train_only_raw, val_raw = split_train_val_stratified(train_raw, n_val, seed=42)
     logger.info(f"Train: {len(train_only_raw)}, Val: {n_val}, Test: {len(test_raw)}")
-    
+
     # Print core_type distribution
     core_types = {}
     for ex in train_only_raw + val_raw + test_raw:
         ct = ex["core_type"]
         core_types[ct] = core_types.get(ct, 0) + 1
     logger.info(f"Core types: {core_types}")
-    
+
     # Seed best_known with reference values.
     # In reference-free mode we must NOT seed from reference (that would leak
     # the reference into the reward via the best_known anchor). Start empty so
@@ -460,56 +731,113 @@ def main():
         seed_best_known(train_only_raw + val_raw + test_raw)
     else:
         logger.info("Reference-free mode: skipping best_known seeding (no reference leak)")
-    
+
+    demos = []
     if args.eval_only:
-        # Load compiled program
-        program_path = Path(args.program_path)
         if program_path.exists():
             logger.info(f"Loading compiled program from {program_path}")
-            compiled = dspy.Module.load(str(program_path))
-            
+            compiled = AlgorithmGenerator()
+            compiled.load(str(program_path))
+            compiled.supplements = load_supplements_for(program_path)
+            if compiled.supplements:
+                logger.info(f"Loaded {len(compiled.supplements)} instruction supplements")
+
             # Evaluate
-            train_result = evaluate(compiled, train_only_raw + val_raw, name="Train",
-                                    use_reference=use_reference)
-            test_result = evaluate(compiled, test_raw, name="Test",
-                                   use_reference=use_reference)
+            train_result = evaluate(
+                compiled, train_only_raw + val_raw, name="Train", use_reference=use_reference
+            )
+            test_result = evaluate(
+                compiled,
+                test_raw,
+                name="Test",
+                use_reference=use_reference,
+                max_repair_attempts=args.max_repair_attempts,
+                exec_timeout=args.exec_timeout,
+            )
         else:
-            logger.error(f"No compiled program found at {program_path}. Run without --eval-first.")
+            logger.error(f"No compiled program found at {program_path}. Run without --eval-only.")
             sys.exit(1)
     else:
         # Phase 1+2: GEPA training
-        demos = None if args.no_demos else build_demonstrations(args.data_dir)
+        if args.no_demos or (not use_reference and args.demo_results is None):
+            demos = []
+            if not use_reference and not args.no_demos:
+                logger.info("Reference-free mode: demos disabled without a clean demo source")
+        else:
+            demos = build_demonstrations(
+                args.data_dir,
+                results_path=args.demo_results,
+                use_reference=use_reference,
+            )
+            if len(demos) < 2:
+                raise SystemExit("Two demonstrations are required; pass --no-demos to opt out")
         compiled = run_gepa_training(
-            train_only_raw, val_raw, test_raw,
-            breadth=args.breadth, depth=args.depth, demos=demos,
+            train_only_raw,
+            val_raw,
+            test_raw,
+            breadth=args.breadth,
+            depth=args.depth,
+            demos=demos,
             out_tag=out_tag,
+            reflection_lm=reflection_lm,
+            output_dir=run_dir,
+            num_threads=args.num_threads,
+            seed_instruction=(
+                args.seed_instruction_file.read_text(encoding="utf-8").strip()
+                if args.seed_instruction_file
+                else None
+            ),
+            reflection_template=(
+                args.reflection_template.read_text(encoding="utf-8")
+                if args.reflection_template
+                else None
+            ),
+            log_dir=run_dir / "gepa_logs" / "run_v3" if args.resume else None,
         )
-        
+
         # Evaluate
-        train_result = evaluate(compiled, train_only_raw + val_raw, name="Train",
-                                use_reference=use_reference)
-        test_result = evaluate(compiled, test_raw, name="Test",
-                               use_reference=use_reference)
-        
-        # Save results
-        results_path = BASE_DIR / f"evaluation_results_v3_gepa_{out_tag}.json"
-        results = {
-            "train": train_result,
-            "test": test_result,
-            "config": {
-                "data_dir": args.data_dir,
-                "n_train": args.n_train,
-                "n_test": args.n_test,
-                "breadth": args.breadth,
-                "depth": args.depth,
-                "demos": 0 if args.no_demos else len(demos or []),
-                "use_reference": use_reference,
-            }
-        }
-        with open(results_path, "w", encoding="utf-8") as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
-        logger.info(f"\nResults saved to {results_path}")
-    
+        if args.skip_final_eval:
+            # Why not 学習ジョブ内で評価: evaluate() は 1 問ずつ順に解くので、大規模問題では
+            # 数十時間かかる。保存したプログラムを compare の shard ジョブで並列に評価する。
+            logger.info("Skipping in-job evaluation (--skip-final-eval)")
+            train_result = test_result = {"skipped": True}
+        else:
+            train_result = evaluate(
+                compiled, train_only_raw + val_raw, name="Train", use_reference=use_reference
+            )
+            test_result = evaluate(
+                compiled,
+                test_raw,
+                name="Test",
+                use_reference=use_reference,
+                max_repair_attempts=args.max_repair_attempts,
+                exec_timeout=args.exec_timeout,
+            )
+
+    results_path = run_dir / f"evaluation_results_v3_gepa_{out_tag}.json"
+    results = {
+        "train": train_result,
+        "test": test_result,
+        "config": {
+            "data_dir": str(Path(args.data_dir).resolve()),
+            "n_train": args.n_train,
+            "n_test": args.n_test,
+            "breadth": args.breadth,
+            "depth": args.depth,
+            "num_threads": args.num_threads,
+            "demos": 0 if args.no_demos else len(demos or []),
+            "use_reference": use_reference,
+            "generation_model": args.generation_model,
+            "generation_api_base": args.generation_api_base,
+            "reflection_model": args.reflection_model,
+            "reflection_api_base": args.reflection_api_base,
+            "program_path": str(program_path.resolve()) if args.eval_only else None,
+        },
+    }
+    with open(results_path, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+    logger.info("\nResults saved to %s", results_path)
+
     # Save best_known
     _bk.registry.save_to_disk()
     logger.info(f"Registry saved to {storage}")

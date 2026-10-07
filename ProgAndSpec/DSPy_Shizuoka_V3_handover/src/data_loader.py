@@ -12,12 +12,16 @@ V2データフォーマット:
 - input_format/output_format → requirements.constraints + requirements.objective
 - reference_value → reference_solution から計算
 """
+
 from __future__ import annotations
 
 import glob
 import json
 import os
 from typing import Any, Dict, List, Tuple
+
+from .metrics_v3 import _select_objective_field
+from .requirement_builder import build_requirement
 
 
 def load_v3_data(data_dir: str) -> List[Dict[str, Any]]:
@@ -55,88 +59,30 @@ def reference_value_from_solution(record: dict) -> float | None:
     ref = record.get("reference_solution", {})
     if not isinstance(ref, dict):
         return None
-    
-    # Try common keys for objective values (minimization)
-    for key in ["objective_value", "total_distance", "project_duration", 
-                "num_trains", "total_cost", "makespan", "total_delay"]:
-        if key in ref and isinstance(ref[key], (int, float)):
-            return float(ref[key])
-    
-    # Fallback: first numeric value found
-    for v in ref.values():
-        if isinstance(v, (int, float)):
-            return float(v)
-    
-    return None
+
+    if isinstance(ref.get("objective_value"), (int, float)) and not isinstance(
+        ref.get("objective_value"), bool
+    ):
+        return float(ref["objective_value"])
+    requirements = record.get("requirements", {})
+    objective_text = requirements.get("objective", "") if isinstance(requirements, dict) else ""
+    _, _, value = _select_objective_field(ref, {}, objective_text=objective_text)
+    return value
 
 
-def convert_to_dspy_example(record: dict) -> dict:
+def convert_to_dspy_example(record: dict, *, use_reference: bool = True) -> dict:
     """V3レコードをDSPy用例に変換。"""
     core_type = core_type_from_v3(record)
     ref_value = reference_value_from_solution(record)
-    
-    # Build requirement text from V3 format
-    req_parts = []
-    req_parts.append(f"## Problem: {record.get('name', 'Unknown')}")
-    req_parts.append(f"Category: {core_type}")
-    req_parts.append(f"Difficulty: {record.get('difficulty', 'N/A')}")
-    
-    # Description
-    desc = record.get("description", "")
-    if desc:
-        req_parts.append(f"## Description\n{desc}")
-    
-    # Requirements
+    enriched = dict(record)
+    enriched["core_type"] = core_type
+    enriched["reference_value"] = ref_value
+    requirement_text = build_requirement(
+        enriched,
+        include_reference_values=use_reference,
+    )
     requirements = record.get("requirements", {})
-    if requirements:
-        req_parts.append("## Requirements")
-        obj = requirements.get("objective", "")
-        if obj:
-            req_parts.append(f"Objective: {obj}")
-        constraints = requirements.get("constraints", [])
-        if constraints:
-            req_parts.append("Constraints:")
-            for c in constraints:
-                req_parts.append(f"  - {c}")
-    
-    # Instance summary
-    instance = record.get("instance", {})
-    if instance:
-        req_parts.append("## Instance Data")
-        inst_summary = {}
-        for k, v in instance.items():
-            if isinstance(v, (int, float)):
-                inst_summary[k] = v
-            elif isinstance(v, str):
-                inst_summary[k] = f"str(len={len(v)})"
-            elif isinstance(v, list):
-                if v and isinstance(v[0], dict):
-                    inst_summary[k] = f"list[{len(v)}] of dicts with keys {list(v[0].keys())}"
-                elif v and isinstance(v[0], (int, float)):
-                    inst_summary[k] = f"list[{len(v)}] of {type(v[0]).__name__}"
-                elif v and isinstance(v[0], list):
-                    inst_summary[k] = f"list[{len(v)}] of lists (inner len={len(v[0])})"
-                else:
-                    inst_summary[k] = f"list[{len(v)}]"
-            elif isinstance(v, dict):
-                inst_summary[k] = f"dict with keys {list(v.keys())}"
-            else:
-                inst_summary[k] = type(v).__name__
-        req_parts.append(json.dumps(inst_summary, indent=2, ensure_ascii=False))
-    
-    # Reference value
-    if ref_value is not None:
-        req_parts.append(f"## Reference Value: {ref_value:.2f}")
-        req_parts.append("Your algorithm should try to achieve a value close to or better than this reference (lower is better).")
-    
-    # Return format instruction
-    req_parts.append("## Return Format")
-    req_parts.append("Your solve() function MUST return the solution as a Python value (list, dict, int, etc.).")
-    req_parts.append("Do NOT use print() to output the solution. Use `return solution` at the end.")
-    req_parts.append("The returned value will be scored automatically.")
-    
-    requirement_text = "\n\n".join(req_parts)
-    
+
     return {
         "instance_id": f"prob_{record.get('id', 0):03d}",
         "instance": record.get("instance", {}),
@@ -153,19 +99,24 @@ def convert_to_dspy_example(record: dict) -> dict:
     }
 
 
-def load_and_split(data_dir: str, train_ratio: float = 0.8) -> Tuple[List[dict], List[dict]]:
+def load_and_split(
+    data_dir: str,
+    train_ratio: float = 0.8,
+    *,
+    use_reference: bool = True,
+) -> Tuple[List[dict], List[dict]]:
     """V3データをロードして訓練/テストに分割。
-    
+
     splitフィールドが"train"/"test"の両方がある場合はそれを尊重。
     片方のみの場合はratio-based分割にフォールバック。
     """
     records = load_v3_data(data_dir)
-    examples = [convert_to_dspy_example(r) for r in records]
-    
+    examples = [convert_to_dspy_example(r, use_reference=use_reference) for r in records]
+
     # Check if split field has both train and test
     splits = set(ex.get("split") for ex in examples)
     has_both = "train" in splits and "test" in splits
-    
+
     if has_both:
         # Respect explicit split field
         train = [ex for ex in examples if ex.get("split") == "train"]
@@ -180,12 +131,43 @@ def load_and_split(data_dir: str, train_ratio: float = 0.8) -> Tuple[List[dict],
             ex["split"] = "train"
         for ex in test:
             ex["split"] = "test"
-    
+
     return train, test
 
 
+def load_split_dirs(
+    data_dir: str,
+    per_kind: dict[str, int],
+    *,
+    use_reference: bool = True,
+) -> dict[str, list[dict]]:
+    """data_dir/{train,validation,test} を読み、分割ごとに種別あたり先頭 N 件を返す（0 は全件）。
+
+    種別は生成問題の provenance.kind、無ければ core_type。id 順に並べて先頭から取るので決定的。
+    """
+    out: dict[str, list[dict]] = {}
+    for split, limit in per_kind.items():
+        records = load_v3_data(os.path.join(data_dir, split))
+        groups: dict[str, list[dict]] = {}
+        for record in sorted(records, key=lambda r: r["id"]):
+            kind = (record.get("provenance") or {}).get("kind") or (
+                f"{record.get('domain')}_{record.get('math_type')}"
+            )
+            groups.setdefault(kind, []).append(record)
+        picked = [
+            r for kind in sorted(groups) for r in (groups[kind][:limit] if limit else groups[kind])
+        ]
+        out[split] = [convert_to_dspy_example(r, use_reference=use_reference) for r in picked]
+    return out
+
+
 def load_and_split_stratified(
-    data_dir: str, n_train: int = 40, n_test: int = 20, seed: int = 42
+    data_dir: str,
+    n_train: int = 40,
+    n_test: int = 20,
+    seed: int = 42,
+    *,
+    use_reference: bool = True,
 ) -> Tuple[List[dict], List[dict]]:
     """core_typeで層化して n_train/n_test を選抜（再現性のためseed固定）。
 
@@ -197,7 +179,7 @@ def load_and_split_stratified(
     import random
 
     records = load_v3_data(data_dir)
-    examples = [convert_to_dspy_example(r) for r in records]
+    examples = [convert_to_dspy_example(r, use_reference=use_reference) for r in records]
 
     groups: Dict[str, List[dict]] = {}
     for ex in examples:
@@ -247,21 +229,78 @@ def load_and_split_stratified(
     return train, test
 
 
+def split_train_val_stratified(
+    examples: list[dict],
+    n_val: int,
+    seed: int = 42,
+) -> tuple[list[dict], list[dict]]:
+    """train集合をcore_typeで層化してtrain/valへ分ける。
+
+    Why not slice the tail: load_and_split_stratified は可読性のため戻り値を
+    instance_id でソートするため、末尾から切るとcore_typeが偏る。実際に
+    40問を末尾13問で切った構成では、val側が3 domainだけになり、train側と
+    ほとんど重ならなかった。GEPAはtrainで反省しvalで候補を選ぶので、
+    この偏りは候補選択をゆがめる。
+
+    - core_typeでグループ化し、seed付きで決定的にシャッフル
+    - ラウンドロビンでvalを埋め、valにcore_type多様性を確保
+    - 戻り値はどちらもinstance_id順
+    """
+    import random
+
+    if n_val <= 0 or n_val >= len(examples):
+        return list(examples), []
+
+    groups: dict[str, list[dict]] = {}
+    for ex in examples:
+        groups.setdefault(ex["core_type"], []).append(ex)
+
+    rng = random.Random(seed)
+    ordered_types = sorted(groups)
+    pools: dict[str, list[dict]] = {}
+    for ct in ordered_types:
+        items = sorted(groups[ct], key=lambda e: e["instance_id"])
+        rng.shuffle(items)
+        pools[ct] = items
+
+    val: list[dict] = []
+    while len(val) < n_val:
+        progressed = False
+        for ct in ordered_types:
+            if len(val) >= n_val:
+                break
+            if pools[ct]:
+                val.append(pools[ct].pop())
+                progressed = True
+        if not progressed:
+            break
+
+    val_ids = {ex["instance_id"] for ex in val}
+    train_only: list[dict] = [ex for ex in examples if ex["instance_id"] not in val_ids]
+
+    train_only.sort(key=lambda e: e["instance_id"])
+    val.sort(key=lambda e: e["instance_id"])
+    return train_only, val
+
+
 def prepare_examples(examples: list[dict]) -> list:
     """V3例をDSPy Exampleに変換。
-    
+
     instanceはwith_inputsに含めない（forward()の引数ではなく、metricで使用する）。
     """
     import dspy
+
     dspys = []
     for ex in examples:
-        dspys.append(dspy.Example(
-            requirement=ex["requirement"],
-            core_type=ex["core_type"],
-            instance=ex["instance"],
-            instance_id=ex["instance_id"],
-            reference_value=ex["reference_value"],
-            reference_solution=ex.get("reference_solution", {}),
-            objective=ex.get("objective", ""),
-        ).with_inputs("requirement", "core_type"))
+        dspys.append(
+            dspy.Example(
+                requirement=ex["requirement"],
+                core_type=ex["core_type"],
+                instance=ex["instance"],
+                instance_id=ex["instance_id"],
+                reference_value=ex["reference_value"],
+                reference_solution=ex.get("reference_solution", {}),
+                objective=ex.get("objective", ""),
+            ).with_inputs("requirement", "core_type")
+        )
     return dspys

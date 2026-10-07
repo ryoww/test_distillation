@@ -23,12 +23,24 @@ def register_scorer(core_type: str, fn: Callable[[dict, Any], float]) -> None:
     SCORERS[core_type] = fn
 
 
-def has_scorer(core_type: str) -> bool:
-    return core_type in SCORERS
+def has_scorer(core_type: str, instance: dict | None = None) -> bool:
+    from .hard import find_kind
+
+    return core_type in SCORERS or (instance is not None and find_kind(instance) is not None)
 
 
 def compute_score(core_type: str, instance: dict, solution: Any) -> float | None:
     """core_type に対応するスコア計算を実行。未登録の場合は None を返す。"""
+    from .hard import find_kind
+
+    hard_kind = find_kind(instance)
+    if hard_kind is not None:
+        # 大規模問題集は検証器が目的値を再計算する。申告値は使わない。
+        try:
+            cost = hard_kind.check(instance, solution).get("cost")
+        except Exception:
+            return None
+        return None if cost is None else -float(cost)
     fn = SCORERS.get(core_type)
     if fn is None:
         return None
@@ -271,6 +283,9 @@ def score_vrp(instance: dict, solution: Any) -> float:
     routes構造から総距離を自前計算。生成コード側のtotal_distanceは検証用。
     空routes/未訪問顧客がある場合はNoneまたは減点。
     """
+    from .feasibility import vrp_view
+
+    instance, solution = vrp_view(instance, solution)
     customers = instance.get("customers", [])
     if not customers:
         return None
@@ -289,32 +304,27 @@ def score_vrp(instance: dict, solution: Any) -> float:
     if not routes:
         return None  # Empty routes
     
-    # Convert routes to list of paths
+    # Convert routes to list of (path, depot id). 複数デポでは経路ごとに出発デポが違う。
     route_list = []
-    if isinstance(routes, dict):
-        for r in routes.values():
+    entries = list(routes.values()) if isinstance(routes, dict) else routes
+    if isinstance(entries, list):
+        for r in entries:
             if isinstance(r, dict):
                 path = r.get("route") or r.get("path") or r.get("customers") or r.get("nodes") or []
+                route_list.append((path, r.get("depot")))
             elif isinstance(r, list):
-                path = r
-            else:
-                continue
-            route_list.append(path)
-    elif isinstance(routes, list):
-        for r in routes:
-            if isinstance(r, dict):
-                path = r.get("route") or r.get("path") or r.get("customers") or r.get("nodes") or []
-            elif isinstance(r, list):
-                path = r
-            else:
-                continue
-            route_list.append(path)
+                route_list.append((r, None))
     
-    if not route_list or all(not p for p in route_list):
+    if not route_list or all(not p for p, _ in route_list):
         return None
     
     # Get depot coords
     depot = instance.get("depot", {})
+    depot_by_id = {
+        d.get("id"): (d.get("x", 0), d.get("y", 0))
+        for d in instance.get("depots", [])
+        if isinstance(d, dict)
+    }
     if isinstance(depot, dict):
         depot_xy = (depot.get("x", 0), depot.get("y", 0))
     elif isinstance(depot, list) and depot:
@@ -335,9 +345,10 @@ def score_vrp(instance: dict, solution: Any) -> float:
     # Compute total distance
     total_dist = 0.0
     visited = set()
-    for path in route_list:
+    for path, route_depot in route_list:
         if not path:
             continue
+        depot_xy = depot_by_id.get(route_depot, depot_xy)
         # Extract node IDs
         nodes = []
         for node in path:
