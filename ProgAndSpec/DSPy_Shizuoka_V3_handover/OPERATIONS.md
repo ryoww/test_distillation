@@ -777,8 +777,16 @@ uv run python scripts/solve_requirement.py data/problems_hard_gen/test/prob_4035
 - 入力はこの repo の問題レコード（JSON）。問題文は参照値を含めずに組み立てる。検証器が種別を知らない問題は
   `unverified`（実行はできたが制約を機械的に確かめられない）として返し、solved とは区別する。
 - 修復段の指示文は `--repair-instruction-file` で差し替えられる（GEPA が進化させた `outputs/<run>/gepa/instruction.md`）。
-- 問題集での採点は `scripts/evaluate_student_program.py`（修復 1 回の `StudentRepairSolver`）か、同じ経路を
-  `slurm_eval_solver.sbatch` の `REPAIR_INSTRUCTION_FILE` で流す。
+- 問題集での採点は `scripts/evaluate_student_program.py`（`OptimizationAgent` と同じ経路）で、`slurm_eval_solver.sbatch`
+  に `REPAIR_INSTRUCTION_FILE`（`default` で既定の修復指示文）、`MAX_REPAIRS`、`FALLBACK_PATH`、`SUPPORTED_KINDS_FILE`
+  を渡す。3 月の構成の実測は `RESCORE_REPORT.md` 33.5 節（4B + 修復 2 回 + 12B フォールバックで大規模 120 問中 93）。
+- **対応種別の判定。** `--supported-kinds-file` を渡すと、種別（大規模問題は instance の形、それ以外は core_type。
+  `src.agent.detect_kind`）が学習した種別に入らない問題は解かずに `unsupported` と理由を返す
+  （`--unsupported-model` を渡せばその LM に回す）。学習していない種別は student も 12B も 0 問だったため。
+  対応表は学習に使ったデータから `scripts/list_supported_kinds.py` で作り、学習対 0 件や長さ超過で落ちた種別を
+  `--exclude-kinds` で外す。現行の 4B / 12B（`data/sft_merged` = v1）用は `prompts/supported_kinds/sft_merged_v1.json`
+  （雛形 25 core_type + 大規模 17 種別、crew_pairing・portfolio・portfolio_cvar を除く）。20 種別を含む v2 で学習し直した
+  student には、そのデータから作り直す。雛形外の問題は雛形と同じ core_type を持つので、この判定では区別できない。
 
 ## 15. 交互最適化の再検証の計画（案 1・案 3、2026-10-07 に方針決定、未着手）
 

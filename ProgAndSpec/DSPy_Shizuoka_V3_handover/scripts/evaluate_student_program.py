@@ -26,7 +26,7 @@ if str(BASE_DIR) not in sys.path:
 import dspy
 
 from src import best_known as _best_known
-from src.agent import OptimizationAgent
+from src.agent import OptimizationAgent, load_supported_kinds
 from src.data_loader import convert_to_dspy_example, load_v3_data
 from src.lm_config import LMConfig, create_lm
 from src.metrics_v3 import evaluate_algorithm_v3
@@ -49,6 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fallback-model", help="student が通らないときに同じ手順で試す大きいモデル")
     parser.add_argument("--fallback-api-base")
     parser.add_argument("--fallback-thinking", choices=("on", "off"), default="off")
+    parser.add_argument("--supported-kinds-file", type=Path, help="対応外の種別を unsupported で返す")
     parser.add_argument("--repair-instruction-file", type=Path)
     parser.add_argument("--max-tokens", type=int, default=8192)
     parser.add_argument("--thinking", choices=("on", "off"), default="on")
@@ -82,7 +83,13 @@ def score_row(agent: OptimizationAgent, example: dict, exec_timeout: float) -> d
         "repaired": any(a.stage.endswith("-repair") for a in result.attempts),
         "fallback_used": result.fallback_used,
         "attempts": len(result.attempts),
+        "kind": result.kind,
+        "supported": result.supported,
     }
+    if result.status == "unsupported":
+        # Why score 0: 対応外と明示して止まるのは誤答（−0.5）より良く、正解でもない。
+        return {**base, "status": "unsupported", "score": 0.0, "detail": result.failure_reason,
+                "elapsed": round(time.monotonic() - started, 2)}
     if "def solve" not in code:
         return {**base, "status": "gen_error", "score": -0.5, "detail": "no solve() in response",
                 "elapsed": round(time.monotonic() - started, 2)}
@@ -155,6 +162,9 @@ def main() -> int:
         repair_instruction=_read(args.repair_instruction_file),
         max_repairs=args.max_repairs,
         exec_timeout=args.exec_timeout,
+        supported_kinds=(
+            load_supported_kinds(args.supported_kinds_file) if args.supported_kinds_file else None
+        ),
     )
 
     shard_dir = args.output_dir / args.run_name / f"{args.label}__shard01of01"

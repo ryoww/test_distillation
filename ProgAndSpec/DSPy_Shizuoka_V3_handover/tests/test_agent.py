@@ -52,3 +52,44 @@ def test_result_serialises_to_plain_dict(monkeypatch):
     payload = result.to_dict()
     assert payload["status"] == "unverified" and isinstance(payload["attempts"][0], dict)
     assert isinstance(dspy.Prediction(**payload), dspy.Prediction)
+
+
+def _hard_instance(kind_name):
+    import json
+    from pathlib import Path
+
+    for path in sorted(Path("data/problems_hard_gen/test").glob("prob_*.json")):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if record["provenance"]["kind"] == kind_name:
+            return record["instance"]
+    raise LookupError(kind_name)
+
+
+def test_detect_kind_uses_instance_shape_for_hard_problems_and_core_type_otherwise():
+    assert ag.detect_kind("whatever", _hard_instance("pdptw")) == "pdptw"
+    assert ag.detect_kind("配送・輸送_混合整数計画", {"x": 1}) == "配送・輸送_混合整数計画"
+
+
+def test_unsupported_kind_is_reported_without_calling_the_student():
+    lm = _ScriptedLM([])
+    agent = ag.OptimizationAgent(lm, supported_kinds={"pdptw"})
+    result = agent.solve("REQ", "x", _hard_instance("portfolio"))
+    assert result.status == "unsupported" and result.kind == "portfolio" and result.supported is False
+    assert lm.seen == [] and "outside the kinds" in result.failure_reason
+
+
+def test_unsupported_kind_goes_to_the_routing_lm_when_given(monkeypatch):
+    _verdicts(monkeypatch, ["feasible"])
+    student, router = _ScriptedLM([]), _ScriptedLM([CODE_B])
+    agent = ag.OptimizationAgent(student, supported_kinds={"pdptw"}, unsupported_lm=router)
+    result = agent.solve("REQ", "x", _hard_instance("portfolio"))
+    assert result.status == "solved" and result.routed_unsupported and result.code == CODE_B
+    assert student.seen == [] and [a.stage for a in result.attempts] == ["unsupported-route"]
+
+
+def test_supported_kind_runs_the_student(monkeypatch):
+    _verdicts(monkeypatch, ["feasible"])
+    result = ag.OptimizationAgent(_ScriptedLM([CODE_A]), supported_kinds={"pdptw"}).solve(
+        "REQ", "x", _hard_instance("pdptw")
+    )
+    assert result.status == "solved" and result.supported is True

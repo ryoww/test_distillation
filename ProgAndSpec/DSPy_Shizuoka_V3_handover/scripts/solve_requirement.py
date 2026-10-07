@@ -19,7 +19,7 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from src.agent import OptimizationAgent
+from src.agent import OptimizationAgent, load_supported_kinds
 from src.data_loader import convert_to_dspy_example
 from src.lm_config import LMConfig, create_lm
 
@@ -37,6 +37,12 @@ def main() -> int:
     parser.add_argument("--max-repairs", type=int, default=2)
     parser.add_argument("--max-tokens", type=int, default=8192)
     parser.add_argument("--exec-timeout", type=float, default=600.0)
+    parser.add_argument(
+        "--supported-kinds-file", type=Path, help="学習した種別の対応表（scripts/list_supported_kinds.py）"
+    )
+    parser.add_argument("--unsupported-model", help="対応外の種別を回す LM（省略時は unsupported で返す）")
+    parser.add_argument("--unsupported-api-base")
+    parser.add_argument("--unsupported-thinking", choices=("on", "off"), default="off")
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
 
@@ -64,9 +70,25 @@ def main() -> int:
                 enable_thinking=args.fallback_thinking == "on",
             )
         )
+    unsupported = None
+    if args.unsupported_model:
+        unsupported = create_lm(
+            LMConfig(
+                model=args.unsupported_model,
+                api_base=args.unsupported_api_base or args.student_api_base,
+                temperature=0.0,
+                max_tokens=args.max_tokens,
+                timeout=1800,
+                enable_thinking=args.unsupported_thinking == "on",
+            )
+        )
     agent = OptimizationAgent(
         student,
         fallback_lm=fallback,
+        supported_kinds=(
+            load_supported_kinds(args.supported_kinds_file) if args.supported_kinds_file else None
+        ),
+        unsupported_lm=unsupported,
         repair_instruction=(
             args.repair_instruction_file.read_text(encoding="utf-8")
             if args.repair_instruction_file
@@ -81,7 +103,7 @@ def main() -> int:
     if args.out:
         args.out.write_text(text + "\n", encoding="utf-8")
     print(text)
-    return 0 if result.status != "failed" else 1
+    return 0 if result.status in ("solved", "unverified") else 1
 
 
 if __name__ == "__main__":

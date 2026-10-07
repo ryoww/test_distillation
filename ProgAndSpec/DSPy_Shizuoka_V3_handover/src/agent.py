@@ -20,7 +20,18 @@ from src.student_program import (
     default_instruction,
 )
 from src.utils.feasibility import check_feasibility_detailed
+from src.utils.hard import find_kind
 from src.verify_loop import verify_solution
+
+
+def detect_kind(core_type: str, instance: dict) -> str:
+    """大規模問題は instance の形で種別名を引き、それ以外は core_type を種別とみなす。
+
+    Why not core_type だけ: 大規模問題は同梱 100 問と core_type が重なる（`src/utils/hard`）。
+    雛形外の問題も雛形と同じ core_type を持つので、この判定では雛形外を見分けられない。
+    """
+    hard = find_kind(instance)
+    return hard.name if hard else core_type
 
 
 @dataclass
@@ -33,7 +44,7 @@ class Attempt:
 
 @dataclass
 class AgentResult:
-    status: str  # solved | unverified | failed
+    status: str  # solved | unverified | failed | unsupported
     code: str
     objective: float | None
     violations: list[str]
@@ -41,6 +52,9 @@ class AgentResult:
     fallback_used: bool = False
     seconds: float = 0.0
     failure_reason: str = ""
+    kind: str = ""
+    supported: bool | None = None  # None は対応表を渡していない
+    routed_unsupported: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -61,9 +75,13 @@ class OptimizationAgent:
         repair_instruction: str | None = None,
         max_repairs: int = 2,
         exec_timeout: float = 600.0,
+        supported_kinds: set[str] | None = None,
+        unsupported_lm=None,
     ):
         self.student_lm = student_lm
         self.fallback_lm = fallback_lm
+        self.supported_kinds = supported_kinds
+        self.unsupported_lm = unsupported_lm
         self.generate_instruction = generate_instruction or default_instruction()
         self.repair = dspy.Predict(
             RepairCode.with_instructions(repair_instruction or DEFAULT_REPAIR_INSTRUCTION)
@@ -99,12 +117,37 @@ class OptimizationAgent:
     def solve(self, requirement: str, core_type: str, instance: dict) -> AgentResult:
         started = time.monotonic()
         attempts: list[Attempt] = []
+        kind = detect_kind(core_type, instance)
+        supported = None if self.supported_kinds is None else kind in self.supported_kinds
+        if supported is False:
+            # Why not student に解かせる: 学習していない種別では student も 12B も 0 問だった
+            # （RESCORE_REPORT 33.5 節）。黙って誤答を返さず、対応外と明示するか、指定の LM に回す。
+            if self.unsupported_lm is None:
+                return AgentResult(
+                    status="unsupported",
+                    code="",
+                    objective=None,
+                    violations=[],
+                    seconds=round(time.monotonic() - started, 1),
+                    failure_reason=f"kind '{kind}' is outside the kinds this student was trained on",
+                    kind=kind,
+                    supported=False,
+                )
+            code, verdict = self._round(
+                self.unsupported_lm, requirement, core_type, instance, "unsupported-route", attempts
+            )
+            return self._finish(code, verdict, core_type, instance, attempts, started, kind, False,
+                                fallback_used=False, routed=True)
         code, verdict = self._round(self.student_lm, requirement, core_type, instance, "student", attempts)
         fallback_used = False
         if not verdict.ok and self.fallback_lm is not None:
             fallback_used = True
             code, verdict = self._round(self.fallback_lm, requirement, core_type, instance, "fallback", attempts)
+        return self._finish(code, verdict, core_type, instance, attempts, started, kind, supported,
+                            fallback_used=fallback_used, routed=False)
 
+    def _finish(self, code, verdict, core_type, instance, attempts, started, kind, supported, *,
+                fallback_used: bool, routed: bool) -> AgentResult:
         objective, violations = None, list(verdict.violations)
         if verdict.ok and verdict.solution is not None:
             checked = check_feasibility_detailed(core_type, instance, verdict.solution)
@@ -119,4 +162,15 @@ class OptimizationAgent:
             fallback_used=fallback_used,
             seconds=round(time.monotonic() - started, 1),
             failure_reason="" if verdict.ok else verdict.feedback[:500],
+            kind=kind,
+            supported=supported,
+            routed_unsupported=routed,
         )
+
+
+def load_supported_kinds(path) -> set[str]:
+    """`scripts/list_supported_kinds.py` が書いた対応表を読む。"""
+    import json
+    from pathlib import Path
+
+    return set(json.loads(Path(path).read_text(encoding="utf-8"))["kinds"])

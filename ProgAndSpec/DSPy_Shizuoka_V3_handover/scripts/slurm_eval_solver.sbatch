@@ -42,6 +42,8 @@ INSTRUCTION_FILE="${INSTRUCTION_FILE:-}"
 # "default" を渡すと既定の修復指示文で、修復ループだけの効果を測る。
 REPAIR_INSTRUCTION_FILE="${REPAIR_INSTRUCTION_FILE:-}"
 MAX_REPAIRS="${MAX_REPAIRS:-1}"
+# 学習した種別の対応表（scripts/list_supported_kinds.py）。渡すと対応外の種別は解かずに unsupported で返す。
+SUPPORTED_KINDS_FILE="${SUPPORTED_KINDS_FILE:-}"
 # フォールバック LM（student が通らないときに同じ手順で試す大きいモデル）。同じ GPU に 2 つ目の vLLM を立てる。
 FALLBACK_PATH="${FALLBACK_PATH:-}"
 FALLBACK_SERVED="${FALLBACK_SERVED:-fallback}"
@@ -169,6 +171,7 @@ for data_dir in $DATA_DIRS; do
         for excluded in $EXCLUDE_TEMPLATED_DIRS; do [[ "$excluded" == "$data_dir" ]] && repair_args+=(--exclude-templated); done
         thinking=on; [[ "$EXTRA_BODY" == *'"enable_thinking": false'* ]] && thinking=off
         repair_args+=(--max-repairs "$MAX_REPAIRS")
+        if [[ -n "$SUPPORTED_KINDS_FILE" ]]; then repair_args+=(--supported-kinds-file "$SUPPORTED_KINDS_FILE"); fi
         if [[ -n "$FALLBACK_PATH" ]]; then
             repair_args+=(--fallback-model "$FALLBACK_SERVED" --fallback-api-base "http://127.0.0.1:$FALLBACK_PORT/v1" --fallback-thinking "$FALLBACK_THINKING")
         fi
