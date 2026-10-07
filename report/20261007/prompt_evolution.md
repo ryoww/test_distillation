@@ -88,6 +88,25 @@ Method
 - Keep ids exactly as the instance gives them (they may start at 0 or at 1) and use them the way the schema shows.
 ```
 
+日本語訳:
+
+```
+最適化問題を解く Python 関数 `def solve(instance):` を 1 つ書き、解を RETURN すること。print は絶対にしない。
+
+Contract（契約）
+1. 「Required Return Schema（返却スキーマ）」に厳密に合わせる。最上位のフィールド名と値の形を同じにする（id をキーにした dict は dict のまま、list は list のまま）。目的値のフィールドには、自分の解が実際に達成した値を入れる。返す前に解から再計算すること。
+2. instance のキーは問題文の STRUCTURE 節から読み、`.get()` と安全な既定値で取り出す。キーを発明しない。
+3. 空の解や仮置きの解を返さない。主の手法が失敗したら、すべての制約を満たす単純な構築的ヒューリスティックにフォールバックする。
+4. 30 秒以内に終える。すべてのソルバーに時間制限（約 20 秒）を与える。
+5. 許可する import: math, random, heapq, itertools, collections, functools, typing, bisect, operator, json, copy, re, numpy, scipy, pulp, networkx, ortools。それ以外は不可。本体を try/except で囲み、どんな失敗でもフォールバックを使う。
+6. 正しい Python だけを書く。括弧を閉じる、本物の `for` ループを使う、生成子式を文として裸で書かない。
+
+Method（手法）
+- instance は小さい（数個〜数十個の要素）。厳密解法を優先する。個数が極小（8 品目か 9 ジョブ程度まで）なら順列や部分集合を全列挙し、そうでなければ CP-SAT（`from ortools.sat.python import cp_model`）か LP（`from scipy.optimize import linprog`）でモデル化し、ソルバーの最適値を取る。
+- 返す前に、問題文に列挙された全制約に対して自分の解を確認する。違反があれば修復するか、フォールバックを使う。
+- id は instance が与えたまま使う（0 始まりのことも 1 始まりのこともある）。スキーマが示すとおりの使い方をする。
+```
+
 ## 付録 B: seed_hard（compact との差分だけ）
 
 ```
@@ -99,6 +118,20 @@ Method
  < - Instances are small (a few to a few dozen entities). Prefer an exact method: enumerate permutations or subsets when the count is tiny (up to about 8 items or 9 jobs); otherwise model the problem with CP-SAT (`from ortools.sat.python import cp_model`) or as an LP (`from scipy.optimize import linprog`) and take the optimal value from the solver.
  ---
  > - Instances can be large (hundreds to thousands of entities, thousands of binary decisions), so exact enumeration will not finish. Build a feasible solution first with a constructive heuristic, then improve it with a time-limited solver (CP-SAT, HiGHS through scipy.optimize.milp or linprog, OR-Tools routing) or with local search, and return the best feasible solution found. Use an exact model only for parts that are small enough to solve within the limit.
+```
+
+日本語訳:
+
+```
+（compact と違う 2 行だけ）
+
+Contract 4:
+  旧: 30 秒以内に終える。すべてのソルバーに時間制限（約 20 秒）を与える。
+  新: 問題文に書かれた実行時間の上限を守り、余裕をもって終える（目安は約 300 秒）。すべてのソルバー呼び出しと探索ループに明示的な時間制限を置く。
+
+Method 1:
+  旧: instance は小さい（数個〜数十個の要素）。厳密解法を優先する。…
+  新: instance は大きいことがある（数百〜数千の要素、数千の二値決定）ので、全列挙は終わらない。まず構築的ヒューリスティックで可行解を作り、時間制限付きのソルバー（CP-SAT、scipy.optimize.milp か linprog を通した HiGHS、OR-Tools routing）か局所探索で改善し、見つかった最良の可行解を返す。厳密モデルは、制限時間内に解ける小さな部分にだけ使う。
 ```
 
 ## 付録 C: Ib1（GEPA が素の Gemma で進化させた指示文）
@@ -130,6 +163,35 @@ Validation before return
 - Ensure ids in routes, flows, plans, rosters, and lists match the instance. Do not return zeros/empty lists when all items must be served/assigned, unless unserved/penalty entries are explicitly allowed.
 ```
 
+日本語訳:
+
+```
+最適化問題を解く Python 関数 `def solve(instance):` を 1 つ書き、解を RETURN すること。print しない。
+
+Contract（契約）
+1. 要求された返却スキーマに厳密に合わせる。最上位のフィールド名と値の形を同じにする。すべてのフィールドに実際の値を入れる。目的値だけでなく、完全な解を取り出す。返す解から数値の目的値を再計算する。目的値のフィールドが複数あれば、別の定義がない限り同じ値にする。
+2. STRUCTURE に示されたキーだけを `.get()` と安全な既定値で読む。`instance` やその中の値を書き換えない。調整するときは list や dict を複製する。id は正確に保つ。要素や制約を発明しない。データが欠けていれば、スキーマに合う最も安全な既定値を使い、不可行なら修復かフォールバックをする。
+3. 空の解や仮置きの解を返さない。フォールバックは本物の可行解か、罰金付きで可行な解でなければならない。必要な品目はすべて処理・割当し、十分なアークや施設を開き、需要分を生産・配分する。未処理を列挙するのは罰金が許されるときだけ。
+4. 問題文に書かれた実行時間の上限を守る。なければ 30 秒とみなす。`time` を import しない。ソルバーの時間制限は上限の約 80% にし、ループには反復回数の上限を置く。上限に達したら止め、最良の可行解を使う。
+5. 許可する import は math, random, heapq, itertools, collections, functools, typing, bisect, operator, json, copy, re, numpy, scipy, pulp, networkx, ortools だけ。本体を try/except で囲み、どんな失敗でもフォールバックを返す。
+6. 正しい Python だけを書く。括弧を閉じる、本物のループを使う、生成子式を文として裸で書かない、暴走した繰り返しのコメントを書かない、すべての try に except か finally を付ける、無限ループを書かない。
+
+Method（手法）
+- 規模と構造で選ぶ。極小: 全列挙。小〜中: CP-SAT / LP。大・難問: 構築的ヒューリスティック + 局所探索、または専用ソルバー。難しい固定費・配送・生産・パッキング・スケジューリングの問題を、素朴な greedy 1 回で終わらせない。
+- ハード制約と罰金項を分ける。ハード制約は返す解で必ず満たす。罰金項は、目的関数が明示的に価格付けしているときだけ破ってよい。
+- パッキング・カッティング: 可行なパターンだけを生成する（形状、容量、ロットサイズ、パターン数の上限）。次にパターンの個数を CP-SAT / LP か greedy + 修復で決める。パターン数に上限があれば多様な可行パターンを作り、必要なら最小限の単品パターンにフォールバックする。
+- スケジューリング・勤務表: 有効な状態やブロックを構築するか、CP-SAT かローリングホライズンを使う。順序規則、連続日数の上限、週の上限、ブロック後の休息、資格、「1 日ちょうど 1 状態」を守る。greedy で割り当てて後からハード規則を直す、はしない。
+- 施設・在庫・配送: 開く施設やアークを選び、顧客や OD を割り当て、期ごとの調達・流量・在庫を計算する。処理能力、保管、安全在庫、在庫の非負、収支、容量を確認する。不可行なら再割当、追加開設、修復をする。
+- VRP・配送: OR-Tools Routing を容量・時間窓の次元付きで使い、許されるなら未処理の罰金を入れ、局所探索を使う。それ以外は可行な経路を構築して違反を修復する。
+- 固定費ネットワークフロー: 限界費用や傾斜費用、逐次最短路、パスに基づく CP-SAT を使い、局所探索で改善する。閉じたアークに流量が乗らないこと、容量を守ることを確かめる。
+- CP-SAT は整数を使う。連続値は安全にスケールして、あとで割り戻す。LP は整数性が不要なときか、緩和としてだけ使う。
+
+Validation（返す前の確認）
+- 返す構造に対して、書かれた制約をすべて確かめる。需要と流量の保存、容量、開いていないアークの流量、経路の始点と終点、積載、時間窓、サービス時間、経路の最大時間、車両数、生産能力、在庫の非負、パターンとロットの上限、スケジューリングの順序規則、罰金と未処理の規則。
+- 問題の費用式で、返す解から目的値を再計算する。ハード制約の違反があれば修復する（流量を落とす、アークを開く、経路を分割・修復する、生産と在庫を調整する、顧客を再割当する）か、フォールバックを返す。
+- 経路、流量、計画、勤務表、リストの id が instance と一致することを確かめる。全品目を処理・割当すべきときに、未処理や罰金の項目が明示的に許されていない限り、0 や空リストを返さない。
+```
+
 ## 付録 D: before（引き継ぎ時の初期指示文）
 
 ```
@@ -159,4 +221,23 @@ FORBIDDEN: os, sys, subprocess, socket, pickle, requests, urllib, importlib, cty
 Choose the algorithm and problem-specific tactics yourself. The requirement
 text contains the instance data (raw JSON) and required return schema —
 read them carefully.
+```
+
+日本語訳:
+
+```
+最適化問題の自然言語の説明が与えられたら、実行可能な Python 関数 `solve(instance) -> solution` を出力せよ。
+
+HARD RULES（絶対に破らない）:
+1. 最上位の関数をちょうど 1 つ定義する: `def solve(instance):`
+2. 解を RETURN する（print しない）。返すオブジェクトは問題文の「Required Return Schema」節に合わせること。最上位のフィールド名が同じで、中身が空でないこと。
+3. 空のスケジュール、空の経路、cost=0 を絶対に返さない。そうした解は score=0.1 で棄却される。
+4. 実行時間の予算: 最大 30 秒。OR-Tools では時間制限を設定する（例: `solver.parameters.max_time_in_seconds = 20`）。
+5. アルゴリズム本体を try/except で囲む。どんな失敗でも、空でない解を作る greedy ヒューリスティックにフォールバックする。
+6. 構文の安全（実行エラーを避ける）: コードは正しい Python でなければならない。すべての括弧を閉じる。`model.Add(expr) for x in items` のような末尾の生成子を絶対に書かず、本物のループを使う: `for x in items: model.Add(expr)`。内包表記の括弧が閉じていることを確かめる。
+
+許可する import: math, random, heapq, itertools, collections, functools, typing, bisect, operator, json, copy, re, ortools, scipy, pulp, networkx, numpy。
+禁止: os, sys, subprocess, socket, pickle, requests, urllib, importlib, ctypes。
+
+アルゴリズムと問題固有の工夫は自分で選ぶこと。問題文には instance のデータ（生の JSON）と返却スキーマが含まれているので、注意深く読むこと。
 ```
