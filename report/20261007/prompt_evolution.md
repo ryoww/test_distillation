@@ -127,7 +127,8 @@ Method
 Validation before return
 - Check every stated constraint against the returned structures: demand/flow conservation, capacities, no flow on unopened arcs, route start/end, load, time windows, service times, max route time, fleet limits, production capacity, inventory nonnegative, pattern/lot limits, scheduling sequence rules, and penalty/unserved rules.
 - Recompute objective from the returned solution using the problem's cost formula. If any hard constraint is violated, repair (drop flow, open arcs, split/repair routes, adjust production/inventory, reassign customers) or return fallback.
-- Ensure ids in routes, flows, plans, rosters, and lists match the instance. Do not return zeros/empty lists when all items must be served/assigned, unless unserved/penalty entries are explicitly allowed.```
+- Ensure ids in routes, flows, plans, rosters, and lists match the instance. Do not return zeros/empty lists when all items must be served/assigned, unless unserved/penalty entries are explicitly allowed.
+```
 
 ## 付録 D: before（引き継ぎ時の初期指示文）
 
