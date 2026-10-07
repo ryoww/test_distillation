@@ -789,8 +789,9 @@ uv run python scripts/solve_requirement.py data/problems_hard_gen/test/prob_4035
 
 ### 15.1 案 1: 学習時に指示文を揺らす（prompt-jitter SFT → GEPA）
 
-狙い: 1 つの system 文面に 1 万 6 千件を張り付けたことが固着の原因なら、文面を複数混ぜれば GEPA の提案が壊れずに
-通る余地ができる。
+狙い: いまの学習は、学習データ 1 万 6 千件すべての先頭に同じ指示文（system）を 1 本だけ付けている。モデルはその 1 本を
+文面ごと覚え、少しでも違う指示文を渡すと崩れる。内容は同じで書き方だけ違う指示文を複数用意し、行ごとにどれかを付けて
+学習すれば、文面ではなく中身を覚えるので、学習後に GEPA が指示文を書き換えても壊れずに提案が通る余地ができる。
 
 1. **指示文の候補を 5 本用意する。** compact（既定）、Ib1（`outputs/bt-base-r1/gepa/instruction.md`）、
    seed_hard（`prompts/seed_instruction_hard.md`）、compact の言い換え 2 本（Contract / Method の順序や語を変えるだけで
