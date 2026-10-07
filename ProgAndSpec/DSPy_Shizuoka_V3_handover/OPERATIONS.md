@@ -779,3 +779,60 @@ uv run python scripts/solve_requirement.py data/problems_hard_gen/test/prob_4035
 - 修復段の指示文は `--repair-instruction-file` で差し替えられる（GEPA が進化させた `outputs/<run>/gepa/instruction.md`）。
 - 問題集での採点は `scripts/evaluate_student_program.py`（修復 1 回の `StudentRepairSolver`）か、同じ経路を
   `slurm_eval_solver.sbatch` の `REPAIR_INSTRUCTION_FILE` で流す。
+
+## 15. 交互最適化の再検証の計画（案 1・案 3、2026-10-07 に方針決定、未着手）
+
+29・31 章の結論は「SFT 済み student の指示文は GEPA で動かない（3 回 52 案、採用 0）」。これを覆せるかを、設定を変えて
+2 本試す。対象は Gemma 4 12B（当面の本線）。どちらも「学習後の GEPA で採用 1 案以上」が最低線で、採用 0 なら
+「交互最適化は学習時の指示文の固定化で失敗する」という知見として 3 月に出す。GPU は共有なので、別セッションの
+ジョブ（修復段の GEPA、評価）の後ろに並べる。
+
+### 15.1 案 1: 学習時に指示文を揺らす（prompt-jitter SFT → GEPA）
+
+狙い: 1 つの system 文面に 1 万 6 千件を張り付けたことが固着の原因なら、文面を複数混ぜれば GEPA の提案が壊れずに
+通る余地ができる。
+
+1. **指示文の候補を 5 本用意する。** compact（既定）、Ib1（`outputs/bt-base-r1/gepa/instruction.md`）、
+   seed_hard（`prompts/seed_instruction_hard.md`）、compact の言い換え 2 本（Contract / Method の順序や語を変えるだけで
+   規則は同じ。`prompts/jitter/` に置く）。
+2. **`merge_sft_datasets.py` に `--system-files a.md,b.md,...` を足す**（未実装）。行ごとに乱数（seed 固定）で 1 本を選んで
+   system に入れる。`--system-file`（全行同じ）はそのまま残す。stats に本ごとの行数を出す。
+3. データ: `templates=data/sft` + `hard_opus=data/sft_hard_opus*2`（20 種別すべて、645 対）。
+4. 学習: `slurm_train_solver.sbatch` で Gemma 4 12B LoRA（r=32、lr 1e-4、1 epoch、最大長 16,384。22 章・28 章と同じ）。
+   H200 1 枚で約 6 時間。焼き込みは `merge_adapter.py --model google/gemma-4-12B-it --model-revision main`。
+5. 評価（指示文ごと）: `slurm_eval_solver.sbatch` に `INSTRUCTION_FILE` を 5 本それぞれ渡し、雛形テスト 445・大規模
+   テスト 120・元問題 28 で測る。1 本 1.5 時間。**ここで 5 本の正解数がほぼ同じなら固着が弱まっている**（S0 は compact
+   以外で壊れた）。
+6. GEPA: `slurm_gepa_student.sbatch` に `STUDENT_PATH=<焼き込み>`、`SHARE_GPU=1`、`GEPA_ARGS="--max-full-evals 6
+   --num-threads 8 --exec-timeout 600 --seed-instruction-file <compact を書いたファイル>"`。GPU 1 枚で 6〜8 時間。
+7. 判定: 採用 1 案以上、かつ採用した指示文での大規模テストが 88 問以上（S0 の水準）。採用した指示文で 5 と同じ評価を取る。
+
+所要: 学習 6 時間 + 評価 7.5 時間 + GEPA 8 時間 ≈ GPU 1 枚で 1 日。
+
+### 15.2 案 3: 論文の条件（自己生成データだけ）で回す
+
+狙い: 論文（Soylu ら）は教師データなしで、プロンプト最適化した素のモデル自身の成功例だけを学習に使う。外部の教師データ
+（Claude・Qwen）が GEPA の効果を埋めているのなら、この条件では相乗効果が見えるはず。精度は落ちる前提の対照実験。
+
+1. **p**: 済み。素の Gemma + GEPA → Ib1（31 章、雛形 345 → 364）。
+2. **標本**: 素の Gemma（思考なし）+ Ib1 で、雛形の学習用 3,560 問（`data/sft/problems_train`）と大規模の学習用 600 問を
+   解く。大規模は済み（`data/sft_hard_base_r1`、正解 6 対）。雛形は `slurm_eval_solver.sbatch` で
+   `DATA_DIRS=data/sft/problems_train MODEL_PATH=google/gemma-4-12B-it INSTRUCTION_FILE=<Ib1> EXTRA_BODY=思考なし
+   CONCURRENCY=24`。素の Gemma は雛形テストの 8 割を解くので、2,800 対前後の見込み。約 3 時間。
+3. **対にする**: `build_hard_sft_dataset.py --runs` は大規模専用なので、**雛形の run 結果（shard JSON の `status` が
+   exact_match / beat_reference の行）を messages 形式にする小さな builder を足す**（未実装。`to_messages` と同じ形、
+   system は Ib1、参照値なしの問題文）。再生（replay）はしない。
+4. **w**: 2〜3 の自己生成データだけ（教師データは入れない）で Gemma 4 12B を LoRA 学習（system = Ib1）。約 1 時間。
+5. **評価**: 雛形テスト 445・大規模テスト 120・元問題 28 を Ib1 で。対照は「素の Gemma + Ib1」（364 / 2 / 1）と
+   「教師データで学習した S0」（442 / 88 / 12）。
+6. **p**: その student で GEPA（`--seed-instruction-file <Ib1>`）。採用 1 案以上なら、採用した指示文で 5 と同じ評価。
+7. 判定: 学習後に素 + Ib1 を上回り（雛形 > 364）、かつ学習後の GEPA で採用 1 案以上。これが出れば「教師データが
+   相乗効果を埋めていた」と言える。出なければ「この問題集では自己生成だけでは足りず、交互最適化は成立しない」。
+
+所要: 標本 3 時間 + 学習 1 時間 + 評価 4.5 時間 + GEPA 8 時間 ≈ GPU 1 枚で 17 時間。
+
+### 15.3 順番と注意
+
+- 案 1 を先に流す（本線の 20 種別 Gemma 4 と同じ学習で、system を揺らすだけ）。案 3 は GPU の空きで。
+- 判定を伴う標本・データ作りは CPU の空いているときに流す（32.4 節。GEPA や評価と重ねると正解の判定が変わる）。
+- 結果は `RESCORE_REPORT.md` の新しい章に、29・31 章と同じ表（指示文 × 集合 × 正解数、GEPA の案数と採用数）で記録する。
