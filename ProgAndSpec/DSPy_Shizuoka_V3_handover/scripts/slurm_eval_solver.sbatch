@@ -67,6 +67,9 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 DEFAULT_EXTRA_BODY='{"chat_template_kwargs": {"enable_thinking": false}}'
 EXTRA_BODY="${EXTRA_BODY:-$DEFAULT_EXTRA_BODY}"
 CONCURRENCY="${CONCURRENCY:-8}"
+# Why not 生成と同じ並列度で実行: 時間制限付きソルバーは CPU の混み具合で解の質が変わり、8 並列では教師と同一の
+# コードが参照より 19〜187% 悪く判定された（RESCORE_REPORT 34.2 節）。生成は CONCURRENCY 並列、実行は EXEC_CONCURRENCY 本ずつ。
+EXEC_CONCURRENCY="${EXEC_CONCURRENCY:-4}"
 # 例: EVAL_ARGS=--exclude-templated で雛形化済みの問題を除き、汎化だけを測る。
 EVAL_ARGS="${EVAL_ARGS:-}"
 READY_TIMEOUT_SEC="${READY_TIMEOUT_SEC:-1500}"
@@ -178,7 +181,7 @@ for data_dir in $DATA_DIRS; do
         uv run python scripts/evaluate_student_program.py \
             --data-dir "$data_dir" --api-base "http://127.0.0.1:$PORT/v1" --model "$SERVED" \
             --label "$LABEL" --run-name "$RUN_NAME-$tag" --max-tokens "$MAX_TOKENS" --thinking "$thinking" \
-            --concurrency "$CONCURRENCY" --timeout "$EVAL_TIMEOUT" --exec-timeout "$EXEC_TIMEOUT" \
+            --concurrency "$CONCURRENCY" --exec-concurrency "$EXEC_CONCURRENCY" --timeout "$EVAL_TIMEOUT" --exec-timeout "$EXEC_TIMEOUT" \
             "${repair_args[@]}" 2>&1 | tee "$LOG_DIR/eval-$tag.log" || status=$?
         continue
     fi
@@ -189,7 +192,7 @@ for data_dir in $DATA_DIRS; do
         --label "$LABEL" \
         --run-name "$RUN_NAME-$tag" \
         --max-tokens "$MAX_TOKENS" --extra-body "$EXTRA_BODY" \
-        --concurrency "$CONCURRENCY" --timeout "$EVAL_TIMEOUT" --exec-timeout "$EXEC_TIMEOUT" "${dir_args[@]}" $EVAL_ARGS 2>&1 | tee "$LOG_DIR/eval-$tag.log" || status=$?
+        --concurrency "$CONCURRENCY" --exec-concurrency "$EXEC_CONCURRENCY" --timeout "$EVAL_TIMEOUT" --exec-timeout "$EXEC_TIMEOUT" "${dir_args[@]}" $EVAL_ARGS 2>&1 | tee "$LOG_DIR/eval-$tag.log" || status=$?
 done
 echo "[$(date +%T)] done (status=$status)"
 exit "$status"

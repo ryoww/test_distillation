@@ -25,6 +25,7 @@ if str(BASE_DIR) not in sys.path:
 
 from src import best_known as _best_known
 from src.data_loader import convert_to_dspy_example, load_v3_data
+from src.exec_gate import exec_slot, set_exec_concurrency
 from src.metrics_v3 import evaluate_algorithm_v3
 from src.modules import AlgorithmGenerator, ensure_parse_helpers, strip_code_fence
 
@@ -45,6 +46,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--concurrency", type=int, default=8)
+    parser.add_argument(
+        "--exec-concurrency",
+        type=int,
+        default=0,
+        help="生成コードを同時に実行する数（0 は --concurrency と同じ。時間制限付きソルバーの判定を安定させる）",
+    )
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--exec-timeout", type=float, default=60.0, help="solve() の実行打ち切り秒数")
     parser.add_argument("--limit", type=int, help="先頭 N 問だけ（動作確認用）")
@@ -156,18 +163,8 @@ def solve_one(args: argparse.Namespace, instruction: str, example: dict) -> dict
     registry = _best_known.BestKnownRegistry()
     if example.get("reference_value") is not None:
         registry.register(example["instance_id"], example["reference_value"])
-    result = evaluate_algorithm_v3(
-        code=code,
-        instance=example["instance"],
-        core_type=example["core_type"],
-        instance_id=example["instance_id"],
-        registry=registry,
-        timeout=args.exec_timeout,
-        reference_value=example.get("reference_value"),
-        reference_solution=example.get("reference_solution", {}),
-        objective_text=example.get("objective", ""),
-        use_reference=True,
-    )
+    with exec_slot():
+        result = _evaluate(args, example, code, registry)
     return {
         "instance_id": example["instance_id"],
         "name": example.get("name", ""),
@@ -184,8 +181,24 @@ def solve_one(args: argparse.Namespace, instruction: str, example: dict) -> dict
     }
 
 
+def _evaluate(args: argparse.Namespace, example: dict, code: str, registry) -> dict:
+    return evaluate_algorithm_v3(
+        code=code,
+        instance=example["instance"],
+        core_type=example["core_type"],
+        instance_id=example["instance_id"],
+        registry=registry,
+        timeout=args.exec_timeout,
+        reference_value=example.get("reference_value"),
+        reference_solution=example.get("reference_solution", {}),
+        objective_text=example.get("objective", ""),
+        use_reference=True,
+    )
+
+
 def main() -> int:
     args = parse_args()
+    set_exec_concurrency(args.exec_concurrency)
     records = load_v3_data(str(args.data_dir))
     examples = []
     for record in records:

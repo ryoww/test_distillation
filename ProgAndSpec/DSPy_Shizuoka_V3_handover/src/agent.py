@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 
 import dspy
 
+from src.exec_gate import exec_slot
 from src.student_program import (
     DEFAULT_REPAIR_INSTRUCTION,
     PlainRepairAdapter,
@@ -95,7 +96,8 @@ class OptimizationAgent:
 
         started = time.monotonic()
         code = ensure_parse_helpers(strip_code_fence(_chat(lm, self.generate_instruction, requirement) or ""))
-        verdict = verify_solution(code, instance, core_type, timeout=self.exec_timeout)
+        with exec_slot():
+            verdict = verify_solution(code, instance, core_type, timeout=self.exec_timeout)
         attempts.append(Attempt(stage, verdict.kind, verdict.feedback, round(time.monotonic() - started, 1)))
         for _ in range(self.max_repairs):
             if verdict.ok:
@@ -108,7 +110,8 @@ class OptimizationAgent:
             if not revised.strip() or revised.strip() == code.strip():
                 break
             code = revised
-            verdict = verify_solution(code, instance, core_type, timeout=self.exec_timeout)
+            with exec_slot():
+                verdict = verify_solution(code, instance, core_type, timeout=self.exec_timeout)
             attempts.append(
                 Attempt(f"{stage}-repair", verdict.kind, verdict.feedback, round(time.monotonic() - started, 1))
             )
