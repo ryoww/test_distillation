@@ -82,7 +82,10 @@ def kinds_from(dirs: list[Path]) -> dict[str, str]:
     for directory in dirs:
         for path in directory.glob("prob_*.json"):
             record = json.loads(path.read_text(encoding="utf-8"))
-            kind = (record.get("provenance") or {}).get("kind")
+            requirements = record.get("requirements")
+            kind = (record.get("provenance") or {}).get("kind") or (
+                requirements.get("kind") if isinstance(requirements, dict) else None
+            )
             table[f"prob_{record['id']:03d}" if record["id"] < 1000 else f"prob_{record['id']}"] = kind or ""
     return table
 

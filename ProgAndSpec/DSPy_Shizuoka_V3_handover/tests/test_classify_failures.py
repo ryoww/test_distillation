@@ -1,4 +1,6 @@
-from scripts.classify_failures import classify
+import json
+
+from scripts.classify_failures import classify, kinds_from
 
 
 def _row(status, detail="", tokens=100, cost=None, ref=None):
@@ -30,3 +32,11 @@ def test_violations_separate_declared_mismatch_from_structural_breakage():
 def test_feasible_but_worse_is_split_at_fifty_percent():
     assert classify(_row("worse", cost=300.0, ref=100.0), 8192) == "gap_large"
     assert classify(_row("worse", cost=120.0, ref=100.0), 8192) == "gap_moderate"
+
+
+def test_original_problems_take_their_kind_from_the_requirements(tmp_path):
+    generated = {"id": 4001, "provenance": {"kind": "clsp"}, "requirements": {"kind": "clsp"}}
+    original = {"id": 302, "provenance": {"source": "hard"}, "requirements": {"kind": "crew_pairing"}}
+    for record in (generated, original):
+        (tmp_path / f"prob_{record['id']}.json").write_text(json.dumps(record), encoding="utf-8")
+    assert kinds_from([tmp_path]) == {"prob_4001": "clsp", "prob_302": "crew_pairing"}
