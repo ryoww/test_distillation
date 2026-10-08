@@ -2000,5 +2000,5 @@ GPU なし・CPU 8 コアだけで動かした。
 - 34.2 節のとおり、ソルバーの解の質は CPU 時間に依存する。8 コアでも学習済み種別は 15 / 17 だったが、コア数の少ない PC や、
   他の重い処理と並べて使う場合は、時間上限（教師コードは 230〜300 秒）を延ばす必要がありうる。
 
-再現: `report/20261008/` の手順メモと同じ。GGUF は `/var/tmp/yy-lab-ft/agents-a1-4b-merged-20261006-q8_0.gguf`、結果は
+再現: `scripts/run_local_pc_check.sh`（GGUF の作り方も冒頭に記載）。GGUF は `/var/tmp/yy-lab-ft/agents-a1-4b-merged-20261006-q8_0.gguf`、結果は
 `outputs/prompt_model_comparisons/local-pc-20261008/`。
