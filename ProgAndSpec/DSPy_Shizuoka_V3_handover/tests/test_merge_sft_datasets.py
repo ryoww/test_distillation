@@ -60,3 +60,19 @@ def test_merge_drops_excluded_kinds_but_keeps_rows_without_kind(tmp_path):
     texts = sorted(r["messages"][0]["content"] for r in merged["train"])
     assert texts == ["keep", "tpl"]
     assert merged["validation"] == []
+
+
+def test_merge_spreads_rows_over_several_system_prompts(tmp_path):
+    row = {
+        "messages": [{"role": "system", "content": "OLD"}, {"role": "user", "content": "Q"}],
+        "tools": None,
+    }
+    _write(tmp_path / "a", "train", [row] * 200)
+    _write(tmp_path / "a", "validation", [row])
+
+    merged = merge([("a", tmp_path / "a", 1)], seed=0, system={"x": "SYS-X", "y": "SYS-Y"})
+
+    systems = [r["messages"][0]["content"] for r in merged["train"]]
+    assert set(systems) == {"SYS-X", "SYS-Y"} and 60 < systems.count("SYS-X") < 140
+    assert all(r["messages"][0]["content"] == f"SYS-{r['system_variant'].upper()}" for r in merged["train"])
+    assert merge([("a", tmp_path / "a", 1)], seed=0, system={"x": "SYS-X", "y": "SYS-Y"}) == merged

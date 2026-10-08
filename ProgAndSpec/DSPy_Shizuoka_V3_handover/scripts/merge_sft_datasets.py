@@ -38,10 +38,14 @@ def with_system(messages: list[dict], system: str | None) -> list[dict]:
 def merge(
     inputs: list[tuple[str, Path, int]],
     seed: int,
-    system: str | None = None,
+    system: str | dict[str, str] | None = None,
     exclude_kinds: frozenset[str] = frozenset(),
 ) -> dict[str, list[dict]]:
+    """system が dict（名前 → 指示文）なら、行ごとに 1 本を乱数で選ぶ（学習時の指示文の揺らし）。"""
     merged: dict[str, list[dict]] = {split: [] for split in SPLITS}
+    # Why 別の乱数列: 並びの shuffle と独立にしておくと、入力を足しても既存行の指示文の割り当てが動かない。
+    pick = random.Random(seed + 1)
+    variants = sorted(system) if isinstance(system, dict) else None
     for label, directory, repeat in inputs:
         for split in SPLITS:
             rows = [
@@ -53,11 +57,14 @@ def merge(
             rows = [r for r in rows if r.get("kind") not in exclude_kinds]
             times = repeat if split == "train" else 1
             for row in rows * times:
+                variant = pick.choice(variants) if variants else None
+                text = system[variant] if variants else system
                 merged[split].append(
                     {
-                        "messages": with_system(row["messages"], system),
+                        "messages": with_system(row["messages"], text),
                         "tools": row.get("tools"),
                         "source": label,
+                        **({"system_variant": variant} if variant else {}),
                     }
                 )
     # Why not 出典ごとの連結のまま: Trainer は既定で shuffle するが、検証側の先頭 N 件だけを
@@ -75,18 +82,31 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--system-file", type=Path, help="全行の system をこの指示文に差し替える")
     parser.add_argument(
+        "--system-files",
+        default="",
+        help="カンマ区切りの指示文ファイル。行ごとに 1 本を乱数で選んで system に入れる（--system-file と排他）",
+    )
+    parser.add_argument(
         "--exclude-kinds", default="", help="学習から外す大規模問題の種別（カンマ区切り、汎化の測定用）"
     )
     args = parser.parse_args()
     exclude = frozenset(k for k in args.exclude_kinds.split(",") if k)
 
     inputs = [parse_input(spec) for spec in args.input]
-    system = args.system_file.read_text(encoding="utf-8") if args.system_file else None
+    files = [Path(f) for f in args.system_files.split(",") if f]
+    if files and args.system_file:
+        raise SystemExit("--system-file and --system-files are exclusive")
+    system: str | dict[str, str] | None
+    if files:
+        system = {f.stem: f.read_text(encoding="utf-8") for f in files}
+    else:
+        system = args.system_file.read_text(encoding="utf-8") if args.system_file else None
     merged = merge(inputs, args.seed, system, exclude)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     stats: dict = {
         "inputs": [f"{l}={p}*{n}" for l, p, n in inputs],
         "system_file": str(args.system_file) if args.system_file else None,
+        "system_files": [str(f) for f in files],
         "exclude_kinds": sorted(exclude),
         "splits": {},
     }
@@ -95,6 +115,10 @@ def main() -> None:
             "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8"
         )
         stats["splits"][split] = dict(Counter(r["source"] for r in rows))
+        if files:
+            stats["splits"][f"{split}_system_variants"] = dict(
+                Counter(r["system_variant"] for r in rows)
+            )
     (args.output_dir / "stats.json").write_text(
         json.dumps(stats, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
