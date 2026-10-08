@@ -2152,4 +2152,7 @@ uv run python scripts/merge_sft_datasets.py --input templates=data/sft --input h
   --input crew312=data/sft_hard_crew312*2 --output-dir data/sft_merged_v3   # 学習 16,408 行（v2 + 30）
 ```
 
-v3 データで 4B を 30 章と同じ設定で学習し（Slurm 941）、焼き込み後に 36.5 節と同じ条件で測る（943・944）。
+v3 データでは Gemma 4 12B を先に学習する（2026-10-09、Gemma を本線にする方針。4B の v3 学習 941 と、v2 の 4B での 3 月の構成の
+評価 939・940 は取り消した）。28 章の FFT と同じ設定（lr 1e-5、fp32 主重み、8-bit AdamW、2 GPU に層を分割）で学習し
+（Slurm 945、`/var/tmp/yy-lab-ft/gemma4-12b-merged-v3-fft-fp32-20261009`）、出力枠 16,384 で雛形・生成テスト（947）と元問題
+（返り値の形を差し替え、948）を測る。
