@@ -61,6 +61,11 @@ def parse_args() -> argparse.Namespace:
         help="system 指示文の前に置くテキスト（例: Ministral Reasoning が思考を開くための推奨 system prompt）",
     )
     parser.add_argument(
+        "--incontext-examples",
+        type=Path,
+        help="種別 → 解答コードの JSON。同じ種別のコードを 1 本、問題文の後ろに例として付ける（学習なしで教師の知識を渡す対照）",
+    )
+    parser.add_argument(
         "--instruction-file",
         type=Path,
         help="既定の指示文の代わりに system に入れる指示文（GEPA で進化させたものなど）",
@@ -104,8 +109,20 @@ def chat(
     return message.get("content") or "", body.get("usage", {})
 
 
+def with_incontext_example(prompt: str, code: str | None) -> str:
+    """同じ種別の別 instance 向けに書かれた解答を、問題文の後ろに参考として付ける。"""
+    if not code:
+        return prompt
+    return (
+        f"{prompt}\n\n## Reference solution for another instance of the same problem kind\n"
+        "The code below solved a different instance of this problem kind. Adapt it to this "
+        f"requirement; the instance data differ.\n```python\n{code.strip()}\n```"
+    )
+
+
 def solve_one(args: argparse.Namespace, instruction: str, example: dict) -> dict:
     prompt = convert_to_dspy_example(example["record"], use_reference=False)["requirement"]
+    prompt = with_incontext_example(prompt, example.get("incontext_code"))
     messages = [{"role": "system", "content": instruction}, {"role": "user", "content": prompt}]
     started = time.monotonic()
     try:
@@ -206,6 +223,12 @@ def main() -> int:
         example["record"] = record
         examples.append(example)
     examples.sort(key=lambda e: e["instance_id"])
+    if args.incontext_examples:
+        from src.agent import detect_kind
+
+        table = json.loads(args.incontext_examples.read_text(encoding="utf-8"))
+        for ex in examples:
+            ex["incontext_code"] = table.get(detect_kind(ex["core_type"], ex["instance"]))
     if args.exclude_templated:
         from src.datagen import TEMPLATES
 
