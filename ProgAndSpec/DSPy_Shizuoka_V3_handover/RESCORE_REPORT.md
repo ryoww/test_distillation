@@ -2131,3 +2131,25 @@ GPU なし・CPU 8 コアだけで動かした。
 
 4B が落とす fjsp_setup・pdptw・vrptw_md は 12B FFT が解くので、3 月の構成を「v2 の 4B + 修復 2 回 + 12B FFT フォールバック」に
 組み直して測る（Slurm 939: 大規模生成 120、940: 元問題 28 で返り値の形を差し替え）。
+
+### 36.6 crew_pairing の教師データの欠け（312 系）を埋める
+
+v2 データの crew_pairing 15 対は、すべて 302 系（「各便ちょうど 1 回・基地帰着」、math_type が全角括弧）の instance だった。
+312 系（「重複カバーまたは外注」、半角括弧）の学習用 15 instance は 0 対で、テストの crew_pairing 6 問は 302 系と 312 系が 3 問ずつ。
+312 系で Opus の解は参照解（Fable のコード）より 10% 以上悪く、正解の条件で外れていた（27.3 節）。
+
+312 系で最良の教師である Fable のコード（`outputs/hard_teachers/crew_pairing/fable__claude__prob_312.py`）を、学習用の 312 系
+instance prob_4042 の解答として置き、同じ種別の他の instance に replay した。312 系は学習用 15 / 15・検証用 2 / 2 で正解、302 系は
+17 / 17 で不正解（規則が違うので当然）。これで crew_pairing は 302 系 15 対（Opus）と 312 系 15 対（Fable）の 30 対になり、他の
+種別と揃う。
+
+```bash
+mkdir -p outputs/crew312_fable/answers
+cp outputs/hard_teachers/crew_pairing/fable__claude__prob_312.py outputs/crew312_fable/answers/prob_4042.py
+uv run python scripts/build_hard_sft_dataset.py --answers fable312=outputs/crew312_fable/answers --replay \
+  --workers 4 --timeout 900 --output-dir data/sft_hard_crew312
+uv run python scripts/merge_sft_datasets.py --input templates=data/sft --input hard_opus=data/sft_hard_opus*2 \
+  --input crew312=data/sft_hard_crew312*2 --output-dir data/sft_merged_v3   # 学習 16,408 行（v2 + 30）
+```
+
+v3 データで 4B を 30 章と同じ設定で学習し（Slurm 941）、焼き込み後に 36.5 節と同じ条件で測る（943・944）。
