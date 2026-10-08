@@ -144,6 +144,18 @@ def schema_table(data_dir: Path) -> dict[str, dict]:
     return {kind: samples[(kind, c.most_common(1)[0][0])] for kind, c in counts.items()}
 
 
+def apply_schema_from(examples: list[dict], data_dir: Path) -> None:
+    """問題文に使う record（prompt_record）だけ、返り値の形を schema_table の形に差し替える。"""
+    from src.agent import detect_kind
+
+    schemas = schema_table(data_dir)
+    for ex in examples:
+        schema = schemas.get(detect_kind(ex["core_type"], ex["instance"]))
+        if schema is not None:
+            # Why not record を書き換える: 採点は元の reference_solution（参照値）で行う。
+            ex["prompt_record"] = {**ex["record"], "reference_solution": schema}
+
+
 def solve_one(args: argparse.Namespace, instruction: str, example: dict) -> dict:
     record = example.get("prompt_record", example["record"])
     prompt = convert_to_dspy_example(record, use_reference=False)["requirement"]
@@ -255,14 +267,7 @@ def main() -> int:
         for ex in examples:
             ex["incontext_code"] = table.get(detect_kind(ex["core_type"], ex["instance"]))
     if args.schema_from:
-        from src.agent import detect_kind
-
-        schemas = schema_table(args.schema_from)
-        for ex in examples:
-            schema = schemas.get(detect_kind(ex["core_type"], ex["instance"]))
-            if schema is not None:
-                # Why not record を書き換える: 採点は元の reference_solution（参照値）で行う。
-                ex["prompt_record"] = {**ex["record"], "reference_solution": schema}
+        apply_schema_from(examples, args.schema_from)
     if args.exclude_templated:
         from src.datagen import TEMPLATES
 

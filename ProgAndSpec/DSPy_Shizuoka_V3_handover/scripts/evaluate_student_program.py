@@ -62,6 +62,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--exclude-templated", action="store_true", help="雛形化済みの問題を除く（汎化の測定用）"
     )
+    parser.add_argument(
+        "--schema-from",
+        type=Path,
+        help="問題文の返り値の形を、この問題ディレクトリの同じ種別でいちばん多い形に差し替える",
+    )
     return parser.parse_args()
 
 
@@ -72,7 +77,8 @@ def _read(path: Path | None) -> str | None:
 def score_row(agent: OptimizationAgent, example: dict, exec_timeout: float) -> dict:
     """1 問をエージェント経路で解いて採点する。参照値は採点にだけ使い、エージェントには渡さない。"""
     started = time.monotonic()
-    prompt = convert_to_dspy_example(example["record"], use_reference=False)["requirement"]
+    record = example.get("prompt_record", example["record"])
+    prompt = convert_to_dspy_example(record, use_reference=False)["requirement"]
     result = agent.solve(prompt, example["core_type"], example["instance"])
     code = result.code
     base = {
@@ -137,6 +143,10 @@ def main() -> int:
 
         templated = {f"prob_{k:03d}" for k in TEMPLATES}
         examples = [ex for ex in examples if ex["instance_id"] not in templated]
+    if args.schema_from:
+        from scripts.evaluate_solver_model import apply_schema_from
+
+        apply_schema_from(examples, args.schema_from)
     if args.limit:
         examples = examples[: args.limit]
 
@@ -204,6 +214,7 @@ def main() -> int:
             "generate_instruction_file": str(args.generate_instruction_file or ""),
             "repair_instruction_file": str(args.repair_instruction_file or ""),
             "thinking": args.thinking,
+            "schema_from": str(args.schema_from or ""),
         },
     }
     (shard_dir / RESULT_FILENAME).write_text(

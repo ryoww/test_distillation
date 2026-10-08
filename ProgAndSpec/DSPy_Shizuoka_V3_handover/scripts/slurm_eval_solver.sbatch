@@ -182,7 +182,7 @@ for data_dir in $DATA_DIRS; do
             --data-dir "$data_dir" --api-base "http://127.0.0.1:$PORT/v1" --model "$SERVED" \
             --label "$LABEL" --run-name "$RUN_NAME-$tag" --max-tokens "$MAX_TOKENS" --thinking "$thinking" \
             --concurrency "$CONCURRENCY" --exec-concurrency "$EXEC_CONCURRENCY" --timeout "$EVAL_TIMEOUT" --exec-timeout "$EXEC_TIMEOUT" \
-            "${repair_args[@]}" 2>&1 | tee "$LOG_DIR/eval-$tag.log" || status=$?
+            "${repair_args[@]}" $EVAL_ARGS 2>&1 | tee "$LOG_DIR/eval-$tag.log" || status=$?
         continue
     fi
     uv run python scripts/evaluate_solver_model.py \
