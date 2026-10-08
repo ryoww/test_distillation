@@ -66,6 +66,12 @@ def parse_args() -> argparse.Namespace:
         help="種別 → 解答コードの JSON。同じ種別のコードを 1 本、問題文の後ろに例として付ける（学習なしで教師の知識を渡す対照）",
     )
     parser.add_argument(
+        "--schema-from",
+        type=Path,
+        help="問題ディレクトリ。問題文の返り値の形（Required Return Schema）を、ここにある同じ種別の問題で"
+        "いちばん多い形に差し替える（学習時と同じ形で解かせる）",
+    )
+    parser.add_argument(
         "--instruction-file",
         type=Path,
         help="既定の指示文の代わりに system に入れる指示文（GEPA で進化させたものなど）",
@@ -120,8 +126,27 @@ def with_incontext_example(prompt: str, code: str | None) -> str:
     )
 
 
+def schema_table(data_dir: Path) -> dict[str, dict]:
+    """種別ごとに、data_dir の問題でいちばん多い返り値の形の reference_solution を 1 つ選ぶ。"""
+    from collections import Counter
+
+    from src.agent import detect_kind
+    from src.requirement_builder import summarize_reference_solution
+
+    counts: dict[str, Counter] = {}
+    samples: dict[tuple[str, str], dict] = {}
+    for record in load_v3_data(str(data_dir)):
+        solution = record.get("reference_solution") or {}
+        kind = detect_kind(convert_to_dspy_example(record)["core_type"], record.get("instance", {}))
+        shape = summarize_reference_solution(solution, record.get("instance", {}), include_values=False)
+        counts.setdefault(kind, Counter())[shape] += 1
+        samples.setdefault((kind, shape), solution)
+    return {kind: samples[(kind, c.most_common(1)[0][0])] for kind, c in counts.items()}
+
+
 def solve_one(args: argparse.Namespace, instruction: str, example: dict) -> dict:
-    prompt = convert_to_dspy_example(example["record"], use_reference=False)["requirement"]
+    record = example.get("prompt_record", example["record"])
+    prompt = convert_to_dspy_example(record, use_reference=False)["requirement"]
     prompt = with_incontext_example(prompt, example.get("incontext_code"))
     messages = [{"role": "system", "content": instruction}, {"role": "user", "content": prompt}]
     started = time.monotonic()
@@ -229,6 +254,15 @@ def main() -> int:
         table = json.loads(args.incontext_examples.read_text(encoding="utf-8"))
         for ex in examples:
             ex["incontext_code"] = table.get(detect_kind(ex["core_type"], ex["instance"]))
+    if args.schema_from:
+        from src.agent import detect_kind
+
+        schemas = schema_table(args.schema_from)
+        for ex in examples:
+            schema = schemas.get(detect_kind(ex["core_type"], ex["instance"]))
+            if schema is not None:
+                # Why not record を書き換える: 採点は元の reference_solution（参照値）で行う。
+                ex["prompt_record"] = {**ex["record"], "reference_solution": schema}
     if args.exclude_templated:
         from src.datagen import TEMPLATES
 
@@ -281,6 +315,7 @@ def main() -> int:
             "temperature": args.temperature,
             "extra_body": json.loads(args.extra_body),
             "prompt": "system=default instruction, user=requirement without reference value",
+            "schema_from": str(args.schema_from) if args.schema_from else None,
         },
     }
     (shard_dir / RESULT_FILENAME).write_text(
