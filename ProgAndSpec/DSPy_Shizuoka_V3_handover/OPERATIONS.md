@@ -788,7 +788,11 @@ uv run python scripts/solve_requirement.py data/problems_hard_gen/test/prob_4035
   （雛形 25 core_type + 大規模 17 種別、crew_pairing・portfolio・portfolio_cvar を除く）。20 種別を含む v2 で学習し直した
   student には、そのデータから作り直す。雛形外の問題は雛形と同じ core_type を持つので、この判定では区別できない。
 
-## 15. 交互最適化の再検証の計画（案 1・案 3、2026-10-07 に方針決定、未着手）
+## 15. 交互最適化の再検証の計画（案 1・案 3、2026-10-07 に方針決定、2026-10-08 から実行中）
+
+状態（2026-10-09）: 案 1 は学習（`gemma4-12b-jitter-lora-20261008`）と指示文 5 本の評価（Slurm 915〜919。918・919 は実行中）が進んでいて、学習後の
+GEPA（920）が待ち。案 3 は学習（`gemma4-12b-btpaper-r1-lora`）と評価（923）が済み、GEPA（924）が待ち。結果は RESCORE_REPORT の
+36 章より後の章に書く。
 
 29・31 章の結論は「SFT 済み student の指示文は GEPA で動かない（3 回 52 案、採用 0）」。これを覆せるかを、設定を変えて
 2 本試す。対象は Gemma 4 12B（当面の本線）。どちらも「学習後の GEPA で採用 1 案以上」が最低線で、採用 0 なら
