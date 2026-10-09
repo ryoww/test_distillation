@@ -27,6 +27,7 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 import dspy
+from dspy.clients._litellm import get_litellm
 
 from src.best_known import init_registry
 from src.data_loader import load_split_dirs, prepare_examples
@@ -85,6 +86,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    # Why not dspy の遅延読み込みに任せる: 並列評価の複数スレッドが同時に litellm を初めて読むと、読み込み途中の
+    # モジュールを掴んで例外になり、GEPA が止まった（Slurm 924）。スレッドを立てる前にメインスレッドで読んでおく。
+    get_litellm(feature="dspy.LM")
     # Why not run_dir の存在で止める: Slurm ジョブが先に logs/ を作る。上書きを防ぐのは GEPA の状態だけでよい。
     if (args.run_dir / "gepa_logs").exists() and not args.resume:
         raise SystemExit(f"{args.run_dir}/gepa_logs exists; pass --resume or use another --run-dir")
