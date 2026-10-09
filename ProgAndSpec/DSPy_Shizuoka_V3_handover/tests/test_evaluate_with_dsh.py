@@ -1,6 +1,6 @@
 import json
 
-from scripts.evaluate_with_dsh import count_events, prepare
+from scripts.evaluate_with_dsh import RESULT_FILENAME, count_events, load_drafts, prepare
 
 
 def test_workspace_holds_the_problem_without_the_reference_value(tmp_path):
@@ -29,3 +29,10 @@ def test_event_stream_is_counted_by_type_and_noise_is_skipped():
          json.dumps({"type": "final"})]
     )
     assert count_events(stream) == {"tool_call": 2, "final": 1}
+
+
+def test_drafts_are_read_per_problem_and_rows_without_code_are_skipped(tmp_path):
+    rows = [{"instance_id": "prob_301", "code": "def solve(i):\n    return {}\n"},
+            {"instance_id": "prob_302", "code": None}]
+    (tmp_path / RESULT_FILENAME).write_text(json.dumps({"test": {"results": rows}}), encoding="utf-8")
+    assert load_drafts(tmp_path) == {"prob_301": "def solve(i):\n    return {}\n"}

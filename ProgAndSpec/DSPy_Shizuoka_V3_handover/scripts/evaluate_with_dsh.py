@@ -42,6 +42,10 @@ the violated constraints, and the objective recomputed from your solution.
 Fix solve.py until the check reports a feasible solution, try to improve the objective, keep solve()
 under {limit} seconds, and reply DONE when solve.py is final."""
 
+DRAFT_NOTE = """
+solve.py already holds a draft written by a model trained on this kind of problem. Run ./check.sh on it
+first. If it is feasible, keep it unless a change clearly improves the objective; if it fails, fix it."""
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -58,6 +62,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task-timeout", type=float, default=3600.0, help="1 問の dsh の打ち切り秒数")
     parser.add_argument("--solve-limit", type=int, default=300, help="solve() に許す秒数（依頼文に書く）")
     parser.add_argument("--exec-timeout", type=float, default=900.0)
+    parser.add_argument(
+        "--draft-run",
+        type=Path,
+        action="append",
+        default=[],
+        help="shard ディレクトリ（複数可）。同じ問題のコードを solve.py の初版として置く（学習モデルの単発の解を直させる）",
+    )
     parser.add_argument("--ids", help="カンマ区切りの instance_id だけ解く（動作確認用）")
     parser.add_argument(
         "--exclude-templated", action="store_true", help="雛形化済みの問題を除く（汎化の測定用）"
@@ -86,6 +97,11 @@ def prepare(workspace: Path, example: dict, solve_limit: int) -> None:
     (workspace / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
 
+def load_drafts(run_dir: Path) -> dict[str, str]:
+    rows = json.loads((run_dir / RESULT_FILENAME).read_text(encoding="utf-8"))["test"]["results"]
+    return {row["instance_id"]: row["code"] for row in rows if row.get("code")}
+
+
 def count_events(stdout: str) -> dict:
     counts: dict[str, int] = {}
     for line in stdout.splitlines():
@@ -104,6 +120,10 @@ def solve_one(args: argparse.Namespace, example: dict) -> dict:
         raise RuntimeError(f"{workspace} is not empty; use another --work-root or --label")
     prepare(workspace, example, args.solve_limit)
     task = TASK.format(limit=args.solve_limit)
+    draft = args.drafts.get(example["instance_id"])
+    if draft:
+        (workspace / "solve.py").write_text(draft, encoding="utf-8")
+        task += DRAFT_NOTE
     started = time.monotonic()
     try:
         proc = subprocess.run(
@@ -154,6 +174,9 @@ def solve_one(args: argparse.Namespace, example: dict) -> dict:
 
 def main() -> int:
     args = parse_args()
+    args.drafts = {}
+    for run_dir in args.draft_run:
+        args.drafts.update(load_drafts(run_dir))
     set_exec_concurrency(args.exec_concurrency)
     examples = []
     for record in load_v3_data(str(args.data_dir)):
@@ -200,6 +223,7 @@ def main() -> int:
             "dsh": str(args.dsh),
             "task_timeout": args.task_timeout,
             "solve_limit": args.solve_limit,
+            "draft_run": [str(d) for d in args.draft_run],
         },
     }
     (shard_dir / RESULT_FILENAME).write_text(
