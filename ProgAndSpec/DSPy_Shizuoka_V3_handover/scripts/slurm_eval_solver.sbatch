@@ -176,6 +176,7 @@ for data_dir in $DATA_DIRS; do
         dsh_args=()
         for excluded in $EXCLUDE_TEMPLATED_DIRS; do [[ "$excluded" == "$data_dir" ]] && dsh_args+=(--exclude-templated); done
         DSH_LOCAL_BASE_URL="http://127.0.0.1:$PORT/v1" DSH_LOCAL_API_KEY=local DSH_LOCAL_MODEL="$SERVED" \
+        DSH_LOCAL_CONTEXT="$MAX_MODEL_LEN" \
         uv run python scripts/evaluate_with_dsh.py --dsh "$DSH" --work-root "$DSH_WORK_ROOT" \
             --data-dir "$data_dir" --label "$LABEL" --run-name "$RUN_NAME-$tag" \
             --concurrency "$CONCURRENCY" --exec-concurrency "$EXEC_CONCURRENCY" --exec-timeout "$EXEC_TIMEOUT" \

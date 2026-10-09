@@ -33,7 +33,9 @@ from src.exec_gate import exec_slot, set_exec_concurrency
 
 TASK = """Solve the optimization problem described in problem.md. The instance data is in instance.json.
 Write a Python file solve.py that defines solve(instance: dict) -> dict and returns the solution in the
-required return schema from problem.md. Use only the libraries problem.md allows.
+required return schema from problem.md. solve() receives the instance as its argument and must not read or
+write files. Allowed imports in solve.py: math, random, heapq, itertools, collections, functools, typing,
+bisect, operator, json, copy, re, numpy, scipy, pulp, networkx, ortools. Nothing else.
 Check your solution by running: ./check.sh
 It runs solve(instance) on instance.json in a sandbox and reports whether the solution is feasible,
 the violated constraints, and the objective recomputed from your solution.
