@@ -24,6 +24,8 @@ from . import best_known as _best_known_module
 from .utils.feasibility import check_feasibility_detailed
 from .utils.scorer import compute_score, has_scorer
 
+MAX_SCORE = 2.5
+
 # Objective field name → (is_minimization) mapping heuristic
 _MIN_KEYWORDS = [
     "cost",
@@ -515,7 +517,7 @@ def compute_v3_score(
             bonuses["incremental"] = incremental
             base += incremental
 
-    total = min(base, 2.5)
+    total = min(base, MAX_SCORE)
     return total, status, bonuses
 
 
@@ -754,7 +756,7 @@ def evaluate_algorithm_v3(
     # Step 6: Exploration bonus
     if new_approach:
         bonuses["exploration"] = 0.03
-        score = min(score + 0.03, 2.5)
+        score = min(score + 0.03, MAX_SCORE)
 
     # Step 7: Update best_known if better
     best_before = best
@@ -786,7 +788,7 @@ def evaluate_algorithm_v3(
         detail_parts.append("feasibility=unverified")
 
     return {
-        "score": min(score, 2.5),
+        "score": min(score, MAX_SCORE),
         "status": status,
         "cost": cost,
         "best_known": best,

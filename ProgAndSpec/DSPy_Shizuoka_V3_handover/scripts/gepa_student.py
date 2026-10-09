@@ -33,6 +33,7 @@ from src.best_known import init_registry
 from src.data_loader import load_split_dirs, prepare_examples
 from src.gepa_feedback_v3 import gepa_feedback_v3, set_exec_timeout, set_use_reference
 from src.lm_config import LMConfig, create_lm
+from src.metrics_v3 import MAX_SCORE
 from src.student_program import (
     StudentRepairSolver,
     StudentSolver,
@@ -152,6 +153,9 @@ def main() -> None:
             args.reflection_template.read_text(encoding="utf-8")
         ),
         max_full_evals=args.max_full_evals,
+        # Why not 既定の 1.0: こちらの採点は最大 2.5 で、参照より 3 割悪い解でも 1.0 を超える。既定のままだと
+        # そうした minibatch を「満点」とみなして反省を飛ばしていた（RESCORE 37.3）。
+        perfect_score=MAX_SCORE,
         track_stats=True,
         log_dir=str(args.run_dir / "gepa_logs"),
         num_threads=args.num_threads,
