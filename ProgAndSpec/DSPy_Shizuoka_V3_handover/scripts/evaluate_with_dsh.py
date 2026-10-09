@@ -34,7 +34,7 @@ from src.exec_gate import exec_slot, set_exec_concurrency
 TASK = """Solve the optimization problem described in problem.md. The instance data is in instance.json.
 Write a Python file solve.py that defines solve(instance: dict) -> dict and returns the solution in the
 required return schema from problem.md. Use only the libraries problem.md allows.
-Check your solution by running: {python} {verify} .
+Check your solution by running: ./check.sh
 It runs solve(instance) on instance.json in a sandbox and reports whether the solution is feasible,
 the violated constraints, and the objective recomputed from your solution.
 Fix solve.py until the check reports a feasible solution, try to improve the objective, keep solve()
@@ -66,6 +66,15 @@ def parse_args() -> argparse.Namespace:
 
 def prepare(workspace: Path, example: dict, solve_limit: int) -> None:
     workspace.mkdir(parents=True, exist_ok=True)
+    # Why not 依頼文に絶対パスのコマンドを書く: モデルが長いパスを覚えきれず、同名の検証スクリプトを
+    # 自作して回し続けた（試運転の prob_301）。作業ディレクトリに短い入口を置く。
+    check = workspace / "check.sh"
+    check.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "{BASE_DIR / "scripts" / "verify_solve.py"}" '
+        '"$(dirname "$0")"\n',
+        encoding="utf-8",
+    )
+    check.chmod(0o755)
     problem = convert_to_dspy_example(example["record"], use_reference=False)["requirement"]
     (workspace / "problem.md").write_text(problem, encoding="utf-8")
     (workspace / "instance.json").write_text(
@@ -92,11 +101,7 @@ def solve_one(args: argparse.Namespace, example: dict) -> dict:
         # Why not 上書き: 前の run の solve.py が残ると、dsh が書かなかった問題まで採点してしまう。
         raise RuntimeError(f"{workspace} is not empty; use another --work-root or --label")
     prepare(workspace, example, args.solve_limit)
-    task = TASK.format(
-        python=sys.executable,
-        verify=BASE_DIR / "scripts" / "verify_solve.py",
-        limit=args.solve_limit,
-    )
+    task = TASK.format(limit=args.solve_limit)
     started = time.monotonic()
     try:
         proc = subprocess.run(

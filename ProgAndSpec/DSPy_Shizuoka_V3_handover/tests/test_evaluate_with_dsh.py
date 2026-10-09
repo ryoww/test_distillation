@@ -19,6 +19,8 @@ def test_workspace_holds_the_problem_without_the_reference_value(tmp_path):
     assert "123.46" not in (tmp_path / "problem.md").read_text(encoding="utf-8")
     assert json.loads((tmp_path / "instance.json").read_text()) == {"jobs": [1, 2]}
     assert json.loads((tmp_path / "meta.json").read_text()) == {"core_type": "toy_kind", "timeout": 300}
+    assert (tmp_path / "check.sh").stat().st_mode & 0o111
+    assert "verify_solve.py" in (tmp_path / "check.sh").read_text()
 
 
 def test_event_stream_is_counted_by_type_and_noise_is_skipped():
