@@ -53,6 +53,9 @@ def create_lm(config: LMConfig) -> dspy.LM:
     # 「モデルに好きなだけ考えさせる」既定になる。
     if config.enable_thinking is not None:
         kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": config.enable_thinking}}
+    # Why not DSPy のキャッシュを使う: キャッシュの鍵は api_base を含まず、こちらは配信名（student、fallback、
+    # gemma4-12b）を中身のモデルを替えて使い回す。別モデルの応答が返り、GEPA の初期の指示文が前の student の
+    # 出力で採点されていた（RESCORE 37.3）。
     return dspy.LM(
         model=_dspy_model_name(config.model),
         api_base=config.api_base,
@@ -60,6 +63,7 @@ def create_lm(config: LMConfig) -> dspy.LM:
         temperature=config.temperature,
         max_tokens=config.max_tokens,
         timeout=config.timeout,
+        cache=False,
         **kwargs,
     )
 
