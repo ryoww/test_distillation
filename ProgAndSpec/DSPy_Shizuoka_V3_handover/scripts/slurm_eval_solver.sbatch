@@ -72,6 +72,9 @@ CONCURRENCY="${CONCURRENCY:-8}"
 EXEC_CONCURRENCY="${EXEC_CONCURRENCY:-4}"
 # 例: EVAL_ARGS=--exclude-templated で雛形化済みの問題を除き、汎化だけを測る。
 EVAL_ARGS="${EVAL_ARGS:-}"
+# DeepSeek Harness（dsh）の非対話モードに解かせるとき（scripts/evaluate_with_dsh.py）。dsh の実行ファイルを指す。
+# DSH_HOME（プロファイル）と DSH_WORK_ROOT（作業ディレクトリの置き場）も渡す。
+DSH="${DSH:-}"
 READY_TIMEOUT_SEC="${READY_TIMEOUT_SEC:-1500}"
 # 入力はおよそ 3k tokens。出力枠と合わせて context に収まらなければ全リクエストが 400 になる。
 if (( MAX_TOKENS + 4096 > MAX_MODEL_LEN )); then
@@ -167,6 +170,18 @@ for data_dir in $DATA_DIRS; do
     if [[ -n "$SYSTEM_PREFIX_FILE" ]]; then dir_args+=(--system-prefix-file "$SYSTEM_PREFIX_FILE"); fi
     if [[ -n "$INSTRUCTION_FILE" ]]; then dir_args+=(--instruction-file "$INSTRUCTION_FILE"); fi
     echo "[$(date +%T)] evaluating $tag ${dir_args[*]:-}"
+    if [[ -n "$DSH" ]]; then
+        : "${DSH_HOME:?set DSH_HOME to the dsh home holding the headless profile}"
+        : "${DSH_WORK_ROOT:?set DSH_WORK_ROOT to an empty directory for per-problem workspaces}"
+        dsh_args=()
+        for excluded in $EXCLUDE_TEMPLATED_DIRS; do [[ "$excluded" == "$data_dir" ]] && dsh_args+=(--exclude-templated); done
+        DSH_LOCAL_BASE_URL="http://127.0.0.1:$PORT/v1" DSH_LOCAL_API_KEY=local DSH_LOCAL_MODEL="$SERVED" \
+        uv run python scripts/evaluate_with_dsh.py --dsh "$DSH" --work-root "$DSH_WORK_ROOT" \
+            --data-dir "$data_dir" --label "$LABEL" --run-name "$RUN_NAME-$tag" \
+            --concurrency "$CONCURRENCY" --exec-concurrency "$EXEC_CONCURRENCY" --exec-timeout "$EXEC_TIMEOUT" \
+            "${dsh_args[@]}" $EVAL_ARGS 2>&1 | tee "$LOG_DIR/eval-$tag.log" || status=$?
+        continue
+    fi
     if [[ -n "$REPAIR_INSTRUCTION_FILE" ]]; then
         repair_args=()
         [[ "$REPAIR_INSTRUCTION_FILE" != "default" ]] && repair_args+=(--repair-instruction-file "$REPAIR_INSTRUCTION_FILE")
