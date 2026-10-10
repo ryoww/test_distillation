@@ -47,6 +47,13 @@ def _rank(kind: str, cost: float | None) -> int:
     return 2 if kind == "unverified" else 3
 
 
+def pick_cascade(candidates: list[tuple[str, str, float | None]]) -> str:
+    """先頭（student）が検証で可行ならそれで終わり、そうでなければ全体から pick する（後段は失敗時だけ走る）。"""
+    if candidates[0][1] == "feasible":
+        return candidates[0][0]
+    return pick(candidates)
+
+
 def pick(candidates: list[tuple[str, str, float | None]]) -> str:
     """(run 名, 検証器の判定, 目的値) の並びから採る run 名を返す。同順位は並びの先。"""
     order = range(len(candidates))
@@ -63,6 +70,11 @@ def main() -> int:
     parser.add_argument("--data-dir", type=Path, required=True)
     parser.add_argument("--out-run", required=True)
     parser.add_argument("--label", required=True)
+    parser.add_argument(
+        "--cascade",
+        action="store_true",
+        help="先頭の run が可行ならそれを採り、後ろの run は先頭が失敗した問題でだけ使う（3 月の構成の段階式）",
+    )
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--timeout", type=float, default=900.0)
     args = parser.parse_args()
@@ -94,7 +106,7 @@ def main() -> int:
         candidates = [
             (label, *verdicts.get((instance_id, label), ("missing", None))) for label in runs
         ]
-        chosen = pick(candidates)
+        chosen = pick_cascade(candidates) if args.cascade else pick(candidates)
         row = dict(runs[chosen].get(instance_id) or next(iter(runs.values()))[instance_id])
         row["picked_from"] = chosen
         row["candidates"] = [{"run": c[0], "verdict": c[1], "cost": c[2]} for c in candidates]
@@ -109,7 +121,12 @@ def main() -> int:
             "total_count": len(picked_rows),
             "mean_score": sum(r["score"] for r in picked_rows) / max(len(picked_rows), 1),
         },
-        "config": {"label": args.label, "runs": args.run, "rule": "feasible with cost (lowest) > feasible > unverified > failed; ties by run order"},
+        "config": {
+            "label": args.label,
+            "runs": args.run,
+            "rule": "feasible with cost (lowest) > feasible > unverified > failed; ties by run order",
+            "cascade": args.cascade,
+        },
     }
     (shard_dir / RESULT_FILENAME).write_text(
         json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8"

@@ -1,4 +1,4 @@
-from scripts.select_verified_best import pick
+from scripts.select_verified_best import pick, pick_cascade
 
 
 def test_the_feasible_candidate_with_the_lowest_recomputed_cost_wins():
@@ -18,3 +18,11 @@ def test_feasible_without_an_objective_beats_unverified_and_failed():
 def test_ties_keep_the_run_order():
     assert pick([("fft", "unverified", None), ("dsh", "unverified", None)]) == "fft"
     assert pick([("fft", "exec_error", None), ("dsh", "infeasible", None)]) == "fft"
+
+
+def test_cascade_stops_at_a_feasible_student_even_if_a_later_run_is_better():
+    assert pick_cascade([("student", "feasible", 120.0), ("agent", "feasible", 100.0)]) == "student"
+
+
+def test_cascade_falls_back_when_the_student_fails():
+    assert pick_cascade([("student", "exec_error", None), ("agent", "feasible", 100.0)]) == "agent"
