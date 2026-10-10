@@ -49,6 +49,11 @@ FALLBACK_PATH="${FALLBACK_PATH:-}"
 FALLBACK_SERVED="${FALLBACK_SERVED:-fallback}"
 FALLBACK_REASONING_PARSER="${FALLBACK_REASONING_PARSER:-gemma4}"
 FALLBACK_THINKING="${FALLBACK_THINKING:-off}"
+# フォールバック側の vLLM に足す引数（dsh のエージェントに使うときのツール呼び出しの解釈器など）。
+FALLBACK_VLLM_EXTRA_ARGS="${FALLBACK_VLLM_EXTRA_ARGS:-}"
+# 3 月の構成を段階式で通して動かすとき（scripts/run_cascade.py）。student の対応表を指す。student は本体の vLLM、
+# 汎用エージェント（dsh）はフォールバックの vLLM を使う。DSH・DSH_HOME・DSH_WORK_ROOT も要る。
+CASCADE_KINDS_FILE="${CASCADE_KINDS_FILE:-}"
 # Why not 常に 0.85: フォールバックと同居させるときは、4B（約 10 GB）と 12B（約 24 GB）に KV の余地を足して分ける。
 if [[ -n "$FALLBACK_PATH" ]]; then GPU_UTIL="${GPU_UTIL:-0.30}"; FALLBACK_GPU_UTIL="${FALLBACK_GPU_UTIL:-0.50}"; else GPU_UTIL="${GPU_UTIL:-0.85}"; fi
 EVAL_TIMEOUT="${EVAL_TIMEOUT:-600}"
@@ -146,7 +151,7 @@ if [[ -n "$FALLBACK_PATH" ]]; then
         exec setsid uv run scripts/serve_vllm.py --vllm-env-dir "$VLLM_ENV" --model-path "$FALLBACK_PATH" --model-revision "" \
             --served-model-name "$FALLBACK_SERVED" --port "$FALLBACK_PORT" --max-model-len "$MAX_MODEL_LEN" \
             --gpu-memory-utilization "$FALLBACK_GPU_UTIL" --max-num-seqs 16 --disable-log-stats --disable-uvicorn-access-log \
-            --reasoning-parser "$FALLBACK_REASONING_PARSER"
+            --reasoning-parser "$FALLBACK_REASONING_PARSER" $FALLBACK_VLLM_EXTRA_ARGS
     ) > "$LOG_DIR/vllm_fallback_$FALLBACK_PORT.log" 2>&1 &
     FALLBACK_PID=$!
     trap 'stop_server; kill -TERM -- "-$FALLBACK_PID" 2>/dev/null || true' EXIT
@@ -170,6 +175,23 @@ for data_dir in $DATA_DIRS; do
     if [[ -n "$SYSTEM_PREFIX_FILE" ]]; then dir_args+=(--system-prefix-file "$SYSTEM_PREFIX_FILE"); fi
     if [[ -n "$INSTRUCTION_FILE" ]]; then dir_args+=(--instruction-file "$INSTRUCTION_FILE"); fi
     echo "[$(date +%T)] evaluating $tag ${dir_args[*]:-}"
+    if [[ -n "$CASCADE_KINDS_FILE" ]]; then
+        : "${FALLBACK_PATH:?set FALLBACK_PATH to the agent model served for dsh}"
+        : "${DSH:?set DSH to the dsh executable}"
+        : "${DSH_HOME:?set DSH_HOME to the dsh home holding the headless profile}"
+        : "${DSH_WORK_ROOT:?set DSH_WORK_ROOT to an empty directory for per-problem workspaces}"
+        cascade_args=()
+        for excluded in $EXCLUDE_TEMPLATED_DIRS; do [[ "$excluded" == "$data_dir" ]] && cascade_args+=(--exclude-templated); done
+        DSH_LOCAL_BASE_URL="http://127.0.0.1:$FALLBACK_PORT/v1" DSH_LOCAL_API_KEY=local DSH_LOCAL_MODEL="$FALLBACK_SERVED" \
+        DSH_LOCAL_CONTEXT="$MAX_MODEL_LEN" \
+        uv run python scripts/run_cascade.py --data-dir "$data_dir" --run-name "$RUN_NAME-$tag" --label "$LABEL" \
+            --student-api-base "http://127.0.0.1:$PORT/v1" --student-model "$SERVED" \
+            --student-max-tokens "$MAX_TOKENS" --student-extra-body "$EXTRA_BODY" \
+            --supported-kinds-file "$CASCADE_KINDS_FILE" --dsh "$DSH" --work-root "$DSH_WORK_ROOT" \
+            --concurrency "$CONCURRENCY" --exec-concurrency "$EXEC_CONCURRENCY" --exec-timeout "$EXEC_TIMEOUT" \
+            "${cascade_args[@]}" $EVAL_ARGS 2>&1 | tee "$LOG_DIR/eval-$tag.log" || status=$?
+        continue
+    fi
     if [[ -n "$DSH" ]]; then
         : "${DSH_HOME:?set DSH_HOME to the dsh home holding the headless profile}"
         : "${DSH_WORK_ROOT:?set DSH_WORK_ROOT to an empty directory for per-problem workspaces}"

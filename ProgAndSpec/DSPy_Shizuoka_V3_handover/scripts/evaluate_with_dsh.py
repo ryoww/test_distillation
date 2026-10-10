@@ -113,55 +113,55 @@ def count_events(stdout: str) -> dict:
     return counts
 
 
-def solve_one(args: argparse.Namespace, example: dict) -> dict:
-    workspace = args.work_root / args.label / example["instance_id"]
+def run_dsh(
+    dsh: Path, workspace: Path, example: dict, solve_limit: int, task_timeout: float,
+    draft: str | None = None,
+) -> tuple[str | None, dict]:
+    """作業ディレクトリで dsh を 1 回走らせ、残った solve.py のコードと実行の記録を返す。"""
     if workspace.exists() and any(workspace.iterdir()):
         # Why not 上書き: 前の run の solve.py が残ると、dsh が書かなかった問題まで採点してしまう。
         raise RuntimeError(f"{workspace} is not empty; use another --work-root or --label")
-    prepare(workspace, example, args.solve_limit)
-    task = TASK.format(limit=args.solve_limit)
-    draft = args.drafts.get(example["instance_id"])
+    prepare(workspace, example, solve_limit)
+    task = TASK.format(limit=solve_limit)
     if draft:
         (workspace / "solve.py").write_text(draft, encoding="utf-8")
         task += DRAFT_NOTE
     started = time.monotonic()
     try:
         proc = subprocess.run(
-            [str(args.dsh), "--profile", "headless", "--json", task],
+            [str(dsh), "--profile", "headless", "--json", task],
             cwd=workspace,
             check=False,
             capture_output=True,
             text=True,
-            timeout=args.task_timeout,
+            timeout=task_timeout,
             env=os.environ.copy(),
         )
         returncode, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
     except subprocess.TimeoutExpired as exc:
         returncode, stdout, stderr = -1, exc.stdout or "", "dsh timed out"
         stdout = stdout.decode() if isinstance(stdout, bytes) else stdout
-    elapsed = time.monotonic() - started
     (workspace / "dsh_events.jsonl").write_text(stdout, encoding="utf-8")
     (workspace / "dsh_stderr.txt").write_text(stderr or "", encoding="utf-8")
-    row = {
-        "instance_id": example["instance_id"],
-        "name": example.get("name", ""),
-        "core_type": example["core_type"],
+    record = {
         "dsh_returncode": returncode,
         "dsh_events": count_events(stdout),
-        "elapsed": elapsed,
+        "dsh_elapsed": time.monotonic() - started,
+        "dsh_stderr_tail": (stderr or "")[-300:],
     }
     solve_path = workspace / "solve.py"
-    if not solve_path.exists():
-        return {**row, "code": None, "status": "gen_error", "score": -0.5,
-                "detail": f"no solve.py (dsh exit {returncode}): {(stderr or '')[-300:]}"}
-    code = solve_path.read_text(encoding="utf-8")
+    code = solve_path.read_text(encoding="utf-8") if solve_path.exists() else None
+    return code, record
+
+
+def score(args: argparse.Namespace, example: dict, code: str) -> dict:
+    """参照値を使う採点（他の章と同じ）。"""
     registry = _best_known.BestKnownRegistry()
     if example.get("reference_value") is not None:
         registry.register(example["instance_id"], example["reference_value"])
     with exec_slot():
         result = _evaluate(args, example, code, registry)
     return {
-        **row,
         "code": code,
         "status": result["status"],
         "score": result["score"],
@@ -170,6 +170,26 @@ def solve_one(args: argparse.Namespace, example: dict) -> dict:
         "detail": result.get("detail", ""),
         "feasibility_verified": result.get("feasibility_verified"),
     }
+
+
+def solve_one(args: argparse.Namespace, example: dict) -> dict:
+    workspace = args.work_root / args.label / example["instance_id"]
+    code, record = run_dsh(
+        args.dsh, workspace, example, args.solve_limit, args.task_timeout,
+        args.drafts.get(example["instance_id"]),
+    )
+    row = {
+        "instance_id": example["instance_id"],
+        "name": example.get("name", ""),
+        "core_type": example["core_type"],
+        "dsh_returncode": record["dsh_returncode"],
+        "dsh_events": record["dsh_events"],
+        "elapsed": record["dsh_elapsed"],
+    }
+    if code is None:
+        return {**row, "code": None, "status": "gen_error", "score": -0.5,
+                "detail": f"no solve.py (dsh exit {record['dsh_returncode']}): {record['dsh_stderr_tail']}"}
+    return {**row, **score(args, example, code)}
 
 
 def main() -> int:
