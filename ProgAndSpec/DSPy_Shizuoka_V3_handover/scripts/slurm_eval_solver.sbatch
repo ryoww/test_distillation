@@ -54,6 +54,9 @@ FALLBACK_VLLM_EXTRA_ARGS="${FALLBACK_VLLM_EXTRA_ARGS:-}"
 # 3 月の構成を段階式で通して動かすとき（scripts/run_cascade.py）。student の対応表を指す。student は本体の vLLM、
 # 汎用エージェント（dsh）はフォールバックの vLLM を使う。DSH・DSH_HOME・DSH_WORK_ROOT も要る。
 CASCADE_KINDS_FILE="${CASCADE_KINDS_FILE:-}"
+# student に 1 問あたり SAMPLES 本書かせ、検証器で 1 本選ぶとき（scripts/sample_and_select.py）。SAMPLE_TEMPERATURE で温度。
+SAMPLES="${SAMPLES:-}"
+SAMPLE_TEMPERATURE="${SAMPLE_TEMPERATURE:-0.7}"
 # Why not 常に 0.85: フォールバックと同居させるときは、4B（約 10 GB）と 12B（約 24 GB）に KV の余地を足して分ける。
 if [[ -n "$FALLBACK_PATH" ]]; then GPU_UTIL="${GPU_UTIL:-0.30}"; FALLBACK_GPU_UTIL="${FALLBACK_GPU_UTIL:-0.50}"; else GPU_UTIL="${GPU_UTIL:-0.85}"; fi
 EVAL_TIMEOUT="${EVAL_TIMEOUT:-600}"
@@ -175,6 +178,14 @@ for data_dir in $DATA_DIRS; do
     if [[ -n "$SYSTEM_PREFIX_FILE" ]]; then dir_args+=(--system-prefix-file "$SYSTEM_PREFIX_FILE"); fi
     if [[ -n "$INSTRUCTION_FILE" ]]; then dir_args+=(--instruction-file "$INSTRUCTION_FILE"); fi
     echo "[$(date +%T)] evaluating $tag ${dir_args[*]:-}"
+    if [[ -n "$SAMPLES" ]]; then
+        uv run python scripts/sample_and_select.py --data-dir "$data_dir" --run-name "$RUN_NAME-$tag" --label "$LABEL" \
+            --api-base "http://127.0.0.1:$PORT/v1" --model "$SERVED" --samples "$SAMPLES" \
+            --temperature "$SAMPLE_TEMPERATURE" --max-tokens "$MAX_TOKENS" --extra-body "$EXTRA_BODY" \
+            --concurrency "$CONCURRENCY" --exec-concurrency "$EXEC_CONCURRENCY" --exec-timeout "$EXEC_TIMEOUT" \
+            $EVAL_ARGS 2>&1 | tee "$LOG_DIR/eval-$tag.log" || status=$?
+        continue
+    fi
     if [[ -n "$CASCADE_KINDS_FILE" ]]; then
         : "${FALLBACK_PATH:?set FALLBACK_PATH to the agent model served for dsh}"
         : "${DSH:?set DSH to the dsh executable}"
