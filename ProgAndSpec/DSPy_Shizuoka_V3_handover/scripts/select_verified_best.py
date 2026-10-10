@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """複数の run の解から、参照値を使わない検証器で問題ごとに 1 つを選び、選んだ行で shard を作る（LLM は呼ばない）。
 
-各 run の保存済みコードを `verify_solution`（src/agent.py と同じ、参照値なし）で走らせ、可行な解のうち
-検証器が計算し直した目的値が最も小さいもの（検証器は最小化の向きにそろえる）を採る。可行な解がなければ
-最初の run の行を残す。採った行の判定（参照値を使った採点）はその run のものをそのまま使う。
+各 run の保存済みコードを `verify_solution`（src/agent.py と同じ、参照値なし）で走らせ、
+「可行で目的値あり（小さい順、検証器は最小化の向きにそろえる）＞ 可行で目的値なし ＞ 検証器が形を読めない ＞ 失敗」
+の順で 1 つ採り、同順位は --run の順。採った行の判定（参照値を使った採点）はその run のものをそのまま使う。
 
   uv run python scripts/select_verified_best.py --data-dir data/problems_hard \\
       --run fft=outputs/prompt_model_comparisons/v3-fft-20261009-problems_hard/fft12b_v3__shard01of01 \\
@@ -29,24 +29,32 @@ from src.data_loader import convert_to_dspy_example, load_v3_data
 OUT_ROOT = BASE_DIR / "outputs" / "prompt_model_comparisons"
 
 
-def _verify(job: tuple[str, dict, str, float]) -> tuple[bool, float | None]:
-    """子プロセスで 1 本を検証し、(可行か, 再計算した目的値) を返す。"""
+def _verify(job: tuple[str, dict, str, float]) -> tuple[str, float | None]:
+    """子プロセスで 1 本を検証し、(検証器の判定, 再計算した目的値) を返す。"""
     from src.utils.feasibility import check_feasibility_detailed
     from src.verify_loop import verify_solution
 
     code, instance, core_type, timeout = job
     verdict = verify_solution(code, instance, core_type, timeout=timeout)
     if verdict.kind != "feasible" or not isinstance(verdict.solution, dict):
-        return False, None
-    return True, check_feasibility_detailed(core_type, instance, verdict.solution).get("cost")
+        return verdict.kind, None
+    return "feasible", check_feasibility_detailed(core_type, instance, verdict.solution).get("cost")
 
 
-def pick(candidates: list[tuple[str, bool, float | None]]) -> str:
-    """(run 名, 可行か, 目的値) の並びから採る run 名を返す。可行がなければ先頭。"""
-    feasible = [c for c in candidates if c[1] and c[2] is not None]
-    if not feasible:
-        return candidates[0][0]
-    return min(feasible, key=lambda c: c[2])[0]
+def _rank(kind: str, cost: float | None) -> int:
+    if kind == "feasible":
+        return 0 if cost is not None else 1
+    return 2 if kind == "unverified" else 3
+
+
+def pick(candidates: list[tuple[str, str, float | None]]) -> str:
+    """(run 名, 検証器の判定, 目的値) の並びから採る run 名を返す。同順位は並びの先。"""
+    order = range(len(candidates))
+    best = min(
+        order,
+        key=lambda i: (_rank(*candidates[i][1:]), candidates[i][2] or 0.0, i),
+    )
+    return candidates[best][0]
 
 
 def main() -> int:
@@ -84,12 +92,12 @@ def main() -> int:
     picked_rows = []
     for instance_id in ids:
         candidates = [
-            (label, *verdicts.get((instance_id, label), (False, None))) for label in runs
+            (label, *verdicts.get((instance_id, label), ("missing", None))) for label in runs
         ]
         chosen = pick(candidates)
         row = dict(runs[chosen].get(instance_id) or next(iter(runs.values()))[instance_id])
         row["picked_from"] = chosen
-        row["candidates"] = [{"run": c[0], "feasible": c[1], "cost": c[2]} for c in candidates]
+        row["candidates"] = [{"run": c[0], "verdict": c[1], "cost": c[2]} for c in candidates]
         picked_rows.append(row)
         print(f"{instance_id}: {chosen} {row['status']} {row['candidates']}", flush=True)
 
@@ -101,7 +109,7 @@ def main() -> int:
             "total_count": len(picked_rows),
             "mean_score": sum(r["score"] for r in picked_rows) / max(len(picked_rows), 1),
         },
-        "config": {"label": args.label, "runs": args.run, "rule": "feasible, lowest recomputed cost"},
+        "config": {"label": args.label, "runs": args.run, "rule": "feasible with cost (lowest) > feasible > unverified > failed; ties by run order"},
     }
     (shard_dir / RESULT_FILENAME).write_text(
         json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8"
